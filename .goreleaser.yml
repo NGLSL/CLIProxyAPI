@@ -6,9 +6,6 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
-      - windows
-      - darwin
-      - freebsd
     goarch:
       - amd64
       - arm64
@@ -19,9 +16,6 @@ builds:
 archives:
   - id: "cli-proxy-api"
     format: tar.gz
-    format_overrides:
-      - goos: windows
-        format: zip
     files:
       - LICENSE
       - README.md
