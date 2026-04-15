@@ -13,6 +13,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -45,7 +48,21 @@ func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
 }
 
 type responsesSSEFramer struct {
-	pending []byte
+	pending            []byte
+	sawTerminalEvent   bool
+	terminalResponseID string
+}
+
+func (f *responsesSSEFramer) observeFrame(frame []byte) {
+	if f == nil || len(frame) == 0 {
+		return
+	}
+	if responsesSSEHasTerminalEvent(frame) {
+		f.sawTerminalEvent = true
+		if f.terminalResponseID == "" {
+			f.terminalResponseID = responsesResponseIDFromChunk(frame)
+		}
+	}
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -61,7 +78,9 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 		if frameLen == 0 {
 			break
 		}
-		writeResponsesSSEChunk(w, f.pending[:frameLen])
+		frame := f.pending[:frameLen]
+		f.observeFrame(frame)
+		writeResponsesSSEChunk(w, frame)
 		copy(f.pending, f.pending[frameLen:])
 		f.pending = f.pending[:len(f.pending)-frameLen]
 	}
@@ -72,6 +91,7 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 	if len(f.pending) == 0 || !responsesSSECanEmitWithoutDelimiter(f.pending) {
 		return
 	}
+	f.observeFrame(f.pending)
 	writeResponsesSSEChunk(w, f.pending)
 	f.pending = f.pending[:0]
 }
@@ -88,6 +108,7 @@ func (f *responsesSSEFramer) Flush(w io.Writer) {
 		f.pending = f.pending[:0]
 		return
 	}
+	f.observeFrame(f.pending)
 	writeResponsesSSEChunk(w, f.pending)
 	f.pending = f.pending[:0]
 }
@@ -194,10 +215,192 @@ func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
 	return false
 }
 
+func responsesSSEHasTerminalEvent(chunk []byte) bool {
+	eventType := ""
+	s := chunk
+	for len(s) > 0 {
+		line := s
+		if i := bytes.IndexByte(s, '\n'); i >= 0 {
+			line = s[:i]
+			s = s[i+1:]
+		} else {
+			s = nil
+		}
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("event:")) {
+			eventType = string(bytes.TrimSpace(line[len("event:"):]))
+			if eventType == "response.completed" || eventType == "response.incomplete" {
+				return true
+			}
+			continue
+		}
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(line[len("data:"):])
+		if len(data) == 0 || !json.Valid(data) {
+			continue
+		}
+		typeField := gjson.GetBytes(data, "type").String()
+		if typeField == "response.completed" || typeField == "response.incomplete" {
+			return true
+		}
+	}
+	return eventType == "response.completed" || eventType == "response.incomplete"
+}
+
+func responsesSSETerminalEOFError() *interfaces.ErrorMessage {
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusRequestTimeout,
+		Error:      fmt.Errorf("stream closed before response.completed or response.incomplete"),
+	}
+}
+
+func responsesSSEWriteTerminalError(w io.Writer, errMsg *interfaces.ErrorMessage) {
+	if errMsg == nil {
+		return
+	}
+	status := http.StatusInternalServerError
+	if errMsg.StatusCode > 0 {
+		status = errMsg.StatusCode
+	}
+	errText := http.StatusText(status)
+	if errMsg.Error != nil && errMsg.Error.Error() != "" {
+		errText = errMsg.Error.Error()
+	}
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+	_, _ = fmt.Fprintf(w, "\nevent: error\ndata: %s\n\n", string(chunk))
+}
+
+func responsesSSEFinalError(framer *responsesSSEFramer) *interfaces.ErrorMessage {
+	if framer != nil && framer.sawTerminalEvent {
+		return nil
+	}
+	return responsesSSETerminalEOFError()
+}
+
+func responsesSSEWriteDone(w io.Writer, framer *responsesSSEFramer) *interfaces.ErrorMessage {
+	if errMsg := responsesSSEFinalError(framer); errMsg != nil {
+		responsesSSEWriteTerminalError(w, errMsg)
+		return errMsg
+	}
+	_, _ = w.Write([]byte("\n"))
+	return nil
+}
+
+const responsesAffinityCacheTTL = 30 * time.Minute
+
+type responsesAffinityCache struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	entries map[string]responsesAffinityEntry
+}
+
+type responsesAffinityEntry struct {
+	authID   string
+	lastSeen time.Time
+}
+
+func newResponsesAffinityCache(ttl time.Duration) *responsesAffinityCache {
+	if ttl <= 0 {
+		ttl = responsesAffinityCacheTTL
+	}
+	return &responsesAffinityCache{
+		ttl:     ttl,
+		entries: make(map[string]responsesAffinityEntry),
+	}
+}
+
+func (c *responsesAffinityCache) get(key string) string {
+	key = strings.TrimSpace(key)
+	if c == nil || key == "" {
+		return ""
+	}
+
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cleanupLocked(now)
+
+	entry, ok := c.entries[key]
+	if !ok || strings.TrimSpace(entry.authID) == "" {
+		return ""
+	}
+	entry.lastSeen = now
+	c.entries[key] = entry
+	return entry.authID
+}
+
+func (c *responsesAffinityCache) record(key string, authID string) {
+	key = strings.TrimSpace(key)
+	authID = strings.TrimSpace(authID)
+	if c == nil || key == "" || authID == "" {
+		return
+	}
+
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cleanupLocked(now)
+	c.entries[key] = responsesAffinityEntry{authID: authID, lastSeen: now}
+}
+
+func (c *responsesAffinityCache) delete(key string) {
+	key = strings.TrimSpace(key)
+	if c == nil || key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, key)
+}
+
+func (c *responsesAffinityCache) cleanupLocked(now time.Time) {
+	if c == nil || c.ttl <= 0 {
+		return
+	}
+	for key, entry := range c.entries {
+		if strings.TrimSpace(entry.authID) == "" || now.Sub(entry.lastSeen) > c.ttl {
+			delete(c.entries, key)
+		}
+	}
+}
+
+type responsesRequestAffinity struct {
+	continuityKey string
+	sessionKey    string
+	pinnedAuthID  string
+	selectedAuth  string
+}
+
+type responsesSSECapture struct {
+	responseID string
+}
+
+type responsesStreamAffinityState struct {
+	affinity *responsesRequestAffinity
+	capture  *responsesSSECapture
+}
+
+func (c *responsesSSECapture) Observe(chunk []byte) {
+	if c == nil || len(chunk) == 0 || c.responseID != "" {
+		return
+	}
+	if responseID := responsesResponseIDFromChunk(chunk); responseID != "" {
+		c.responseID = responseID
+	}
+}
+
+var defaultResponsesAffinityCache = newResponsesAffinityCache(0)
+
 // OpenAIResponsesAPIHandler contains the handlers for OpenAIResponses API endpoints.
 // It holds a pool of clients to interact with the backend service.
 type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
+	affinityCache *responsesAffinityCache
 }
 
 // NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
@@ -211,6 +414,7 @@ type OpenAIResponsesAPIHandler struct {
 func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIResponsesAPIHandler {
 	return &OpenAIResponsesAPIHandler{
 		BaseAPIHandler: apiHandlers,
+		affinityCache:  defaultResponsesAffinityCache,
 	}
 }
 
@@ -224,6 +428,154 @@ func (h *OpenAIResponsesAPIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
 	return modelRegistry.GetAvailableModels("openai")
+}
+
+const (
+	responsesAffinityKeyPrefixResponse = "response:"
+	responsesAffinityKeyPrefixSession  = "session:"
+)
+
+func responsesAffinityKey(prefix string, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	return prefix + raw
+}
+
+func responsesResponseAffinityKey(responseID string) string {
+	return responsesAffinityKey(responsesAffinityKeyPrefixResponse, responseID)
+}
+
+func responsesSessionAffinityKey(sessionID string) string {
+	return responsesAffinityKey(responsesAffinityKeyPrefixSession, sessionID)
+}
+
+func responsesContinuityKey(rawJSON []byte) string {
+	if key := strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()); key != "" {
+		return responsesResponseAffinityKey(key)
+	}
+	if key := strings.TrimSpace(gjson.GetBytes(rawJSON, "session_id").String()); key != "" {
+		return responsesSessionAffinityKey(key)
+	}
+	return ""
+}
+
+func responsesSessionKey(rawJSON []byte) string {
+	return strings.TrimSpace(gjson.GetBytes(rawJSON, "session_id").String())
+}
+
+func responsesResponseIDFromJSON(rawJSON []byte) string {
+	if responseID := strings.TrimSpace(gjson.GetBytes(rawJSON, "response.id").String()); responseID != "" {
+		return responseID
+	}
+	return strings.TrimSpace(gjson.GetBytes(rawJSON, "id").String())
+}
+
+func responsesResponseIDFromChunk(chunk []byte) string {
+	for _, line := range bytes.Split(chunk, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(line[len("data:"):])
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) || !json.Valid(data) {
+			continue
+		}
+		typ := strings.TrimSpace(gjson.GetBytes(data, "type").String())
+		if typ != "response.completed" && typ != "response.incomplete" {
+			continue
+		}
+		if responseID := strings.TrimSpace(gjson.GetBytes(data, "response.id").String()); responseID != "" {
+			return responseID
+		}
+	}
+	return ""
+}
+
+func (h *OpenAIResponsesAPIHandler) ensureAffinityCache() {
+	if h != nil && h.affinityCache == nil {
+		h.affinityCache = defaultResponsesAffinityCache
+	}
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesPinnedAuthID(key string) string {
+	h.ensureAffinityCache()
+	key = strings.TrimSpace(key)
+	if h == nil || h.affinityCache == nil || key == "" {
+		return ""
+	}
+	authID := strings.TrimSpace(h.affinityCache.get(key))
+	if authID == "" {
+		return ""
+	}
+	if h.AuthManager == nil {
+		return authID
+	}
+	if auth, ok := h.AuthManager.GetByID(authID); ok && auth != nil {
+		return authID
+	}
+	h.affinityCache.delete(key)
+	return ""
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesPrepareRequestContext(ctx context.Context, rawJSON []byte) (context.Context, *responsesRequestAffinity) {
+	h.ensureAffinityCache()
+	affinity := &responsesRequestAffinity{
+		continuityKey: responsesContinuityKey(rawJSON),
+		sessionKey:    responsesSessionKey(rawJSON),
+	}
+	if affinity.continuityKey != "" {
+		affinity.pinnedAuthID = h.responsesPinnedAuthID(affinity.continuityKey)
+	}
+	if affinity.pinnedAuthID == "" && affinity.sessionKey != "" {
+		affinity.pinnedAuthID = h.responsesPinnedAuthID(responsesSessionAffinityKey(affinity.sessionKey))
+	}
+	if affinity.pinnedAuthID != "" {
+		ctx = handlers.WithPinnedAuthID(ctx, affinity.pinnedAuthID)
+	}
+	ctx = handlers.WithSelectedAuthIDCallback(ctx, func(authID string) {
+		affinity.selectedAuth = strings.TrimSpace(authID)
+	})
+	if affinity.sessionKey != "" {
+		ctx = handlers.WithExecutionSessionID(ctx, affinity.sessionKey)
+	}
+	return ctx, affinity
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesRecordAffinity(affinity *responsesRequestAffinity, responseID string) {
+	h.ensureAffinityCache()
+	if h == nil || h.affinityCache == nil || affinity == nil {
+		return
+	}
+	authID := strings.TrimSpace(affinity.selectedAuth)
+	if authID == "" {
+		authID = strings.TrimSpace(affinity.pinnedAuthID)
+	}
+	if authID == "" {
+		return
+	}
+	if key := strings.TrimSpace(responseID); key != "" {
+		h.affinityCache.record(responsesResponseAffinityKey(key), authID)
+	}
+	if key := strings.TrimSpace(affinity.sessionKey); key != "" {
+		h.affinityCache.record(responsesSessionAffinityKey(key), authID)
+	}
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesRecordAffinityFromJSON(affinity *responsesRequestAffinity, payload []byte) {
+	h.responsesRecordAffinity(affinity, responsesResponseIDFromJSON(payload))
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesRecordAffinityFromSSE(affinity *responsesRequestAffinity, capture *responsesSSECapture, framer *responsesSSEFramer) {
+	if framer != nil && strings.TrimSpace(framer.terminalResponseID) != "" {
+		h.responsesRecordAffinity(affinity, framer.terminalResponseID)
+		return
+	}
+	if capture == nil {
+		return
+	}
+	h.responsesRecordAffinity(affinity, capture.responseID)
 }
 
 // OpenAIResponsesModels handles the /v1/models endpoint.
@@ -321,6 +673,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, affinity := h.responsesPrepareRequestContext(cliCtx, rawJSON)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
@@ -330,6 +683,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		cliCancel(errMsg.Error)
 		return
 	}
+	h.responsesRecordAffinityFromJSON(affinity, resp)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
@@ -355,9 +709,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		return
 	}
 
-	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, affinity := h.responsesPrepareRequestContext(cliCtx, rawJSON)
+	capture := &responsesSSECapture{}
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
 	setSSEHeaders := func() {
@@ -390,11 +745,15 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				// Stream closed without data? Send headers and done.
+				// A clean close without a terminal Responses event is still a terminal stream error.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = c.Writer.Write([]byte("\n"))
+				errMsg := responsesSSEWriteDone(c.Writer, framer)
 				flusher.Flush()
+				if errMsg != nil {
+					cliCancel(errMsg.Error)
+					return
+				}
 				cliCancel(nil)
 				return
 			}
@@ -403,44 +762,43 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
-			// Write first chunk logic (matching forwardResponsesStream)
+			capture.Observe(chunk)
 			framer.WriteChunk(c.Writer, chunk)
 			flusher.Flush()
 
-			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
+			state := &responsesStreamAffinityState{affinity: affinity, capture: capture}
+			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer, state)
 			return
 		}
 	}
 }
 
-func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
+func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer, state ...*responsesStreamAffinityState) {
 	if framer == nil {
 		framer = &responsesSSEFramer{}
 	}
+	var affinity *responsesRequestAffinity
+	var capture *responsesSSECapture
+	if len(state) > 0 && state[0] != nil {
+		affinity = state[0].affinity
+		capture = state[0].capture
+	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
+			if capture != nil {
+				capture.Observe(chunk)
+			}
 			framer.WriteChunk(c.Writer, chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			framer.Flush(c.Writer)
-			if errMsg == nil {
-				return
-			}
-			status := http.StatusInternalServerError
-			if errMsg.StatusCode > 0 {
-				status = errMsg.StatusCode
-			}
-			errText := http.StatusText(status)
-			if errMsg.Error != nil && errMsg.Error.Error() != "" {
-				errText = errMsg.Error.Error()
-			}
-			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
-			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+			responsesSSEWriteTerminalError(c.Writer, errMsg)
 		},
 		WriteDone: func() {
 			framer.Flush(c.Writer)
-			_, _ = c.Writer.Write([]byte("\n"))
+			if errMsg := responsesSSEWriteDone(c.Writer, framer); errMsg == nil {
+				h.responsesRecordAffinityFromSSE(affinity, capture, framer)
+			}
 		},
 	})
 }
