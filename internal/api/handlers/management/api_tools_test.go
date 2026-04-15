@@ -210,3 +210,12 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
 	}
 }
+
+func TestLatestReleaseURLPointsToForkRepository(t *testing.T) {
+	t.Parallel()
+
+	const want = "https://api.github.com/repos/NGLSL/CLIProxyAPI/releases/latest"
+	if latestReleaseURL != want {
+		t.Fatalf("latestReleaseURL = %q, want %q", latestReleaseURL, want)
+	}
+}
