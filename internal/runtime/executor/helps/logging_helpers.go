@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	apiAttemptsKey          = "API_UPSTREAM_ATTEMPTS"
-	apiRequestKey           = "API_REQUEST"
-	apiResponseKey          = "API_RESPONSE"
-	apiWebsocketTimelineKey = "API_WEBSOCKET_TIMELINE"
+	apiAttemptsKey                 = "API_UPSTREAM_ATTEMPTS"
+	apiRequestKey                  = "API_REQUEST"
+	apiResponseKey                 = "API_RESPONSE"
+	apiWebsocketTimelineKey        = "API_WEBSOCKET_TIMELINE"
+	apiAttemptResponseTimestampKey = "API_ATTEMPT_RESPONSE_TIMESTAMP"
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
@@ -54,10 +55,13 @@ type upstreamAttempt struct {
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		ginCtx.Set(apiAttemptResponseTimestampKey, time.Time{})
+	}
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}
@@ -206,10 +210,13 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		ginCtx.Set(apiAttemptResponseTimestampKey, time.Time{})
+	}
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}
@@ -451,10 +458,16 @@ func markAPIResponseTimestamp(ginCtx *gin.Context) {
 	if ginCtx == nil {
 		return
 	}
+	now := time.Now()
+	if value, exists := ginCtx.Get(apiAttemptResponseTimestampKey); !exists {
+		ginCtx.Set(apiAttemptResponseTimestampKey, now)
+	} else if timestamp, ok := value.(time.Time); !ok || timestamp.IsZero() {
+		ginCtx.Set(apiAttemptResponseTimestampKey, now)
+	}
 	if _, exists := ginCtx.Get("API_RESPONSE_TIMESTAMP"); exists {
 		return
 	}
-	ginCtx.Set("API_RESPONSE_TIMESTAMP", time.Now())
+	ginCtx.Set("API_RESPONSE_TIMESTAMP", now)
 }
 
 func writeHeaders(builder *strings.Builder, headers http.Header) {

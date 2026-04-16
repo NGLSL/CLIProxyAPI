@@ -90,3 +90,50 @@ func TestUsageReporterBuildRecordIncludesFirstByteLatency(t *testing.T) {
 		t.Fatalf("first byte latency = %v, want 250ms", record.FirstByteLatency)
 	}
 }
+
+func TestUsageReporterBuildRecordPrefersAttemptFirstByteLatency(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	requestedAt := time.Now().Add(-1500 * time.Millisecond)
+	staleFirstByteAt := requestedAt.Add(-200 * time.Millisecond)
+	attemptFirstByteAt := requestedAt.Add(250 * time.Millisecond)
+	ginCtx.Set("API_RESPONSE_TIMESTAMP", staleFirstByteAt)
+	ginCtx.Set(apiAttemptResponseTimestampKey, attemptFirstByteAt)
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	reporter := &UsageReporter{
+		provider:    "openai",
+		model:       "gpt-5.4",
+		requestedAt: requestedAt,
+	}
+
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
+	if record.FirstByteLatency != 250*time.Millisecond {
+		t.Fatalf("first byte latency = %v, want 250ms", record.FirstByteLatency)
+	}
+}
+
+func TestUsageReporterBuildRecordDoesNotFallbackToGlobalTimestampAfterAttemptReset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	requestedAt := time.Now().Add(-1500 * time.Millisecond)
+	staleFirstByteAt := requestedAt.Add(-200 * time.Millisecond)
+	ginCtx.Set("API_RESPONSE_TIMESTAMP", staleFirstByteAt)
+	ginCtx.Set(apiAttemptResponseTimestampKey, time.Time{})
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	reporter := &UsageReporter{
+		provider:    "openai",
+		model:       "gpt-5.4",
+		requestedAt: requestedAt,
+	}
+
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
+	if record.FirstByteLatency != 0 {
+		t.Fatalf("first byte latency = %v, want 0", record.FirstByteLatency)
+	}
+}

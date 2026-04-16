@@ -140,6 +140,13 @@ func apiResponseTimestampFromContext(ctx context.Context) time.Time {
 	if !ok || ginCtx == nil {
 		return time.Time{}
 	}
+	if value, exists := ginCtx.Get(apiAttemptResponseTimestampKey); exists {
+		timestamp, ok := value.(time.Time)
+		if !ok {
+			return time.Time{}
+		}
+		return timestamp
+	}
 	value, exists := ginCtx.Get("API_RESPONSE_TIMESTAMP")
 	if !exists {
 		return time.Time{}
