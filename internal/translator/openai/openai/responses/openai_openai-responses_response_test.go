@@ -30,13 +30,17 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 	request := []byte(`{"model":"gpt-5.4","tool_choice":"auto","parallel_tool_calls":true}`)
 
 	tests := []struct {
-		name           string
-		in             []string
-		doneInputIndex int // Index in tt.in where the terminal [DONE] chunk arrives and response.completed must be emitted.
-		hasUsage       bool
-		inputTokens    int64
-		outputTokens   int64
-		totalTokens    int64
+		name                  string
+		in                    []string
+		doneInputIndex        int // Index in tt.in where the terminal [DONE] chunk arrives and response.completed must be emitted.
+		hasUsage              bool
+		inputTokens           int64
+		outputTokens          int64
+		totalTokens           int64
+		wantMessageText       string
+		wantFunctionCallID    string
+		wantFunctionCallName  string
+		wantFunctionArguments string
 	}{
 		{
 			// A provider may send finish_reason first and only attach usage in a later chunk (e.g. Vertex AI),
@@ -135,6 +139,85 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 				t.Fatalf("unexpected response.usage.total_tokens: got %d want %d", got, tt.totalTokens)
 			}
 		})
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MessageWithoutFinishReasonCompletesOnDone(t *testing.T) {
+	t.Parallel()
+
+	request := []byte(`{"model":"gpt-5.4","tool_choice":"auto","parallel_tool_calls":true}`)
+	in := []string{
+		`data: {"id":"resp_msg_no_finish","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello world","reasoning_content":null,"tool_calls":null},"finish_reason":null}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	completedInputIndex := -1
+	var completedData gjson.Result
+	for i, line := range in {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event != "response.completed" {
+				continue
+			}
+			completedInputIndex = i
+			completedData = data
+		}
+	}
+
+	if completedInputIndex != 1 {
+		t.Fatalf("expected response.completed on terminal [DONE] chunk at input index 1, got %d", completedInputIndex)
+	}
+	if got := completedData.Get("response.output.0.type").String(); got != "message" {
+		t.Fatalf("unexpected response.output.0.type: got %q want %q", got, "message")
+	}
+	if got := completedData.Get("response.output.0.content.0.text").String(); got != "hello world" {
+		t.Fatalf("unexpected response.output.0.content.0.text: got %q want %q", got, "hello world")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallWithoutFinishReasonCompletesOnDone(t *testing.T) {
+	t.Parallel()
+
+	request := []byte(`{"model":"gpt-5.4","tool_choice":"auto","parallel_tool_calls":true}`)
+	in := []string{
+		`data: {"id":"resp_func_no_finish","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_func_no_finish","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_func_no_finish","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\"}"}}]},"finish_reason":null}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	completedInputIndex := -1
+	var completedData gjson.Result
+	for i, line := range in {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event != "response.completed" {
+				continue
+			}
+			completedInputIndex = i
+			completedData = data
+		}
+	}
+
+	if completedInputIndex != 2 {
+		t.Fatalf("expected response.completed on terminal [DONE] chunk at input index 2, got %d", completedInputIndex)
+	}
+	if got := completedData.Get("response.output.0.type").String(); got != "function_call" {
+		t.Fatalf("unexpected response.output.0.type: got %q want %q", got, "function_call")
+	}
+	if got := completedData.Get("response.output.0.call_id").String(); got != "call_func_no_finish" {
+		t.Fatalf("unexpected response.output.0.call_id: got %q want %q", got, "call_func_no_finish")
+	}
+	if got := completedData.Get("response.output.0.name").String(); got != "read" {
+		t.Fatalf("unexpected response.output.0.name: got %q want %q", got, "read")
+	}
+	args := completedData.Get("response.output.0.arguments").String()
+	if !gjson.Valid(args) {
+		t.Fatalf("expected response.output.0.arguments to be valid JSON, got %q", args)
+	}
+	if got := gjson.Get(args, "filePath").String(); got != `C:\repo\README.md` {
+		t.Fatalf("unexpected response.output.0.arguments.filePath: got %q want %q", got, `C:\repo\README.md`)
 	}
 }
 

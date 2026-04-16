@@ -62,6 +62,19 @@ func emitRespEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
 }
 
+func hasCompletedResponseOutput(st *oaiToResponsesState) bool {
+	if st == nil {
+		return false
+	}
+	if len(st.MsgItemAdded) > 0 || len(st.FuncCallIDs) > 0 || len(st.Reasonings) > 0 {
+		return true
+	}
+	if st.ReasoningID != "" && st.ReasoningBuf.Len() > 0 {
+		return true
+	}
+	return false
+}
+
 func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte, nextSeq func() int) []byte {
 	completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
 	completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
@@ -146,6 +159,12 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			outputItems = append(outputItems, completedOutputItem{index: r.OutputIndex, raw: item})
 		}
 	}
+	if st.ReasoningID != "" {
+		item := []byte(`{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`)
+		item, _ = sjson.SetBytes(item, "id", st.ReasoningID)
+		item, _ = sjson.SetBytes(item, "summary.0.text", st.ReasoningBuf.String())
+		outputItems = append(outputItems, completedOutputItem{index: st.ReasoningIndex, raw: item})
+	}
 	if len(st.MsgItemAdded) > 0 {
 		for i := range st.MsgItemAdded {
 			txt := ""
@@ -227,7 +246,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		return [][]byte{}
 	}
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		if st.CompletionPending && !st.CompletedEmitted {
+		if !st.CompletedEmitted && (st.CompletionPending || hasCompletedResponseOutput(st)) {
 			st.CompletedEmitted = true
 			return [][]byte{buildResponsesCompletedEvent(st, requestRawJSON, func() int { st.Seq++; return st.Seq })}
 		}
