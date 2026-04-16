@@ -1,9 +1,12 @@
 package helps
 
 import (
+	"context"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -54,11 +57,36 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 		requestedAt: time.Now().Add(-1500 * time.Millisecond),
 	}
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
 	if record.Latency < time.Second {
 		t.Fatalf("latency = %v, want >= 1s", record.Latency)
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+	if record.FirstByteLatency != 0 {
+		t.Fatalf("first byte latency = %v, want 0", record.FirstByteLatency)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesFirstByteLatency(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	requestedAt := time.Now().Add(-1500 * time.Millisecond)
+	firstByteAt := requestedAt.Add(250 * time.Millisecond)
+	ginCtx.Set("API_RESPONSE_TIMESTAMP", firstByteAt)
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	reporter := &UsageReporter{
+		provider:    "openai",
+		model:       "gpt-5.4",
+		requestedAt: requestedAt,
+	}
+
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
+	if record.FirstByteLatency != 250*time.Millisecond {
+		t.Fatalf("first byte latency = %v, want 250ms", record.FirstByteLatency)
 	}
 }

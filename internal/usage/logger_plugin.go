@@ -89,12 +89,13 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp          time.Time  `json:"timestamp"`
+	LatencyMs          int64      `json:"latency_ms"`
+	FirstByteLatencyMs *int64     `json:"first_byte_latency_ms,omitempty"`
+	Source             string     `json:"source"`
+	AuthIndex          string     `json:"auth_index"`
+	Tokens             TokenStats `json:"tokens"`
+	Failed             bool       `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -198,12 +199,13 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.apis[statsKey] = stats
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: normaliseLatency(record.Latency),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    detail,
-		Failed:    failed,
+		Timestamp:          timestamp,
+		LatencyMs:          normaliseLatency(record.Latency),
+		FirstByteLatencyMs: normaliseOptionalLatency(record.FirstByteLatency),
+		Source:             record.Source,
+		AuthIndex:          record.AuthIndex,
+		Tokens:             detail,
+		Failed:             failed,
 	})
 
 	s.requestsByDay[dayKey]++
@@ -473,6 +475,14 @@ func normaliseLatency(latency time.Duration) int64 {
 		return 0
 	}
 	return latency.Milliseconds()
+}
+
+func normaliseOptionalLatency(latency time.Duration) *int64 {
+	if latency <= 0 {
+		return nil
+	}
+	value := latency.Milliseconds()
+	return &value
 }
 
 func formatHour(hour int) string {

@@ -70,7 +70,7 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 		}
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, detail, failed))
 	})
 }
 
@@ -83,25 +83,26 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, usage.Detail{}, false))
 	})
 }
 
-func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool) usage.Record {
 	if r == nil {
 		return usage.Record{Detail: detail, Failed: failed}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       r.model,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		Failed:      failed,
-		Detail:      detail,
+		Provider:         r.provider,
+		Model:            r.model,
+		Source:           r.source,
+		APIKey:           r.apiKey,
+		AuthID:           r.authID,
+		AuthIndex:        r.authIndex,
+		RequestedAt:      r.requestedAt,
+		Latency:          r.latency(),
+		FirstByteLatency: r.firstByteLatency(ctx),
+		Failed:           failed,
+		Detail:           detail,
 	}
 }
 
@@ -114,6 +115,40 @@ func (r *UsageReporter) latency() time.Duration {
 		return 0
 	}
 	return latency
+}
+
+func (r *UsageReporter) firstByteLatency(ctx context.Context) time.Duration {
+	if r == nil || r.requestedAt.IsZero() {
+		return 0
+	}
+	responseTimestamp := apiResponseTimestampFromContext(ctx)
+	if responseTimestamp.IsZero() {
+		return 0
+	}
+	latency := responseTimestamp.Sub(r.requestedAt)
+	if latency <= 0 {
+		return 0
+	}
+	return latency
+}
+
+func apiResponseTimestampFromContext(ctx context.Context) time.Time {
+	if ctx == nil {
+		return time.Time{}
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return time.Time{}
+	}
+	value, exists := ginCtx.Get("API_RESPONSE_TIMESTAMP")
+	if !exists {
+		return time.Time{}
+	}
+	timestamp, ok := value.(time.Time)
+	if !ok {
+		return time.Time{}
+	}
+	return timestamp
 }
 
 func APIKeyFromContext(ctx context.Context) string {

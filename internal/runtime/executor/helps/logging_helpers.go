@@ -101,10 +101,13 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil && !isStreamingResponseHeaders(headers) {
+		markAPIResponseTimestamp(ginCtx)
+	}
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}
@@ -125,7 +128,13 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	updateAggregatedResponse(ginCtx, attempts)
 }
 
-// RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
+func isStreamingResponseHeaders(headers http.Header) bool {
+	if len(headers) == 0 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(headers.Get("Content-Type"))), "text/event-stream")
+}
+
 func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
 	if cfg == nil || !cfg.RequestLog || err == nil {
 		return
@@ -152,14 +161,17 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	data := bytes.TrimSpace(chunk)
 	if len(data) == 0 {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		markAPIResponseTimestamp(ginCtx)
+	}
+	if cfg == nil || !cfg.RequestLog {
+		return
+	}
 	if ginCtx == nil {
 		return
 	}
@@ -283,18 +295,20 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
 
 // AppendAPIWebsocketResponse stores an upstream websocket response frame in Gin context.
 func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	data := bytes.TrimSpace(payload)
 	if len(data) == 0 {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		markAPIResponseTimestamp(ginCtx)
+	}
+	if cfg == nil || !cfg.RequestLog {
+		return
+	}
 	if ginCtx == nil {
 		return
 	}
-	markAPIResponseTimestamp(ginCtx)
 
 	builder := &strings.Builder{}
 	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
@@ -307,14 +321,16 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 
 // RecordAPIWebsocketError stores an upstream websocket error event in Gin context.
 func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage string, err error) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		markAPIResponseTimestamp(ginCtx)
+	}
 	if cfg == nil || !cfg.RequestLog || err == nil {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}
-	markAPIResponseTimestamp(ginCtx)
 
 	builder := &strings.Builder{}
 	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
@@ -328,6 +344,9 @@ func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage stri
 }
 
 func ginContextFrom(ctx context.Context) *gin.Context {
+	if ctx == nil {
+		return nil
+	}
 	ginCtx, _ := ctx.Value("gin").(*gin.Context)
 	return ginCtx
 }
