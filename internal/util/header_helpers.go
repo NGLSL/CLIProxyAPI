@@ -5,13 +5,31 @@ import (
 	"strings"
 )
 
+// ApplyHeaderMap applies the provided header map to the target header collection.
+func ApplyHeaderMap(target http.Header, headers map[string]string) {
+	applyHeaderMap(target, headers, nil)
+}
+
+// ApplyHeaderMapExcept applies the provided header map while preserving protected headers.
+func ApplyHeaderMapExcept(target http.Header, headers map[string]string, protectedKeys ...string) {
+	applyHeaderMap(target, headers, buildProtectedHeaderSet(protectedKeys...))
+}
+
 // ApplyCustomHeadersFromAttrs applies user-defined headers stored in the provided attributes map.
-// Custom headers override built-in defaults when conflicts occur.
+// Custom headers override existing request headers when conflicts occur.
 func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string) {
 	if r == nil {
 		return
 	}
-	applyCustomHeaders(r, extractCustomHeaders(attrs))
+	ApplyHeaderMap(r.Header, extractCustomHeaders(attrs))
+}
+
+// ApplyCustomHeadersFromAttrsExcept applies user-defined headers while preserving protected headers.
+func ApplyCustomHeadersFromAttrsExcept(r *http.Request, attrs map[string]string, protectedKeys ...string) {
+	if r == nil {
+		return
+	}
+	ApplyHeaderMapExcept(r.Header, extractCustomHeaders(attrs), protectedKeys...)
 }
 
 func extractCustomHeaders(attrs map[string]string) map[string]string {
@@ -39,14 +57,40 @@ func extractCustomHeaders(attrs map[string]string) map[string]string {
 	return headers
 }
 
-func applyCustomHeaders(r *http.Request, headers map[string]string) {
-	if r == nil || len(headers) == 0 {
+func buildProtectedHeaderSet(keys ...string) map[string]struct{} {
+	if len(keys) == 0 {
+		return nil
+	}
+	protected := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(key))
+		if canonical == "" {
+			continue
+		}
+		protected[canonical] = struct{}{}
+	}
+	if len(protected) == 0 {
+		return nil
+	}
+	return protected
+}
+
+func applyHeaderMap(target http.Header, headers map[string]string, protected map[string]struct{}) {
+	if target == nil || len(headers) == 0 {
 		return
 	}
 	for k, v := range headers {
-		if k == "" || v == "" {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(k))
+		if canonical == "" {
 			continue
 		}
-		r.Header.Set(k, v)
+		val := strings.TrimSpace(v)
+		if val == "" {
+			continue
+		}
+		if _, blocked := protected[canonical]; blocked {
+			continue
+		}
+		target.Set(canonical, val)
 	}
 }

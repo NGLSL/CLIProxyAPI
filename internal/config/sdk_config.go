@@ -24,6 +24,10 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// ForwardRequestHeaders defines global headers injected into upstream AI forwarding requests.
+	// These headers apply only to upstream provider calls and never to management or local APIs.
+	ForwardRequestHeaders map[string]string `yaml:"forward-request-headers" json:"forward-request-headers"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

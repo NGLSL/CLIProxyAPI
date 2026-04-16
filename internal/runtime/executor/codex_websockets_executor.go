@@ -812,10 +812,6 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	if headers == nil {
 		headers = http.Header{}
 	}
-	if strings.TrimSpace(token) != "" {
-		headers.Set("Authorization", "Bearer "+token)
-	}
-
 	var ginHeaders http.Header
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header.Clone()
@@ -863,13 +859,77 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		}
 	}
 
+	applyCodexWebsocketCustomHeaders(headers, auth, cfg)
+	if strings.TrimSpace(token) != "" {
+		headers.Set("Authorization", "Bearer "+token)
+	}
+
+	return headers
+}
+
+func applyCodexWebsocketCustomHeaders(headers http.Header, auth *cliproxyauth.Auth, cfg *config.Config) {
+	if headers == nil {
+		return
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
+	util.ApplyCustomHeadersFromAttrsExcept(&http.Request{Header: headers}, attrs, "Authorization")
+	if cfg != nil {
+		util.ApplyHeaderMapExcept(headers, cfg.ForwardRequestHeaders, "Authorization")
+	}
+	codexCfg := resolveCodexConfigForWebsocket(auth, cfg)
+	if codexCfg == nil {
+		return
+	}
+	util.ApplyHeaderMapExcept(headers, codexCfg.Headers, "Authorization")
+}
 
-	return headers
+func resolveCodexConfigForWebsocket(auth *cliproxyauth.Auth, cfg *config.Config) *config.CodexKey {
+	if auth == nil || cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range cfg.CodexKey {
+		entry := &cfg.CodexKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && attrBase != "" {
+			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range cfg.CodexKey {
+			entry := &cfg.CodexKey[i]
+			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
+}
+
+func codexWebsocketCustomHeaderValue(auth *cliproxyauth.Auth, name string) string {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(auth.Attributes["header:"+http.CanonicalHeaderKey(strings.TrimSpace(name))])
 }
 
 func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string) {

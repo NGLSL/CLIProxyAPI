@@ -43,15 +43,53 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 		return nil
 	}
 	_, apiKey := e.resolveCredentials(auth)
-	if strings.TrimSpace(apiKey) != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+	e.prepareUpstreamRequest(req, auth, apiKey)
+	return nil
+}
+
+func (e *OpenAICompatExecutor) applyConfigHeaders(req *http.Request, auth *cliproxyauth.Auth) {
+	if req == nil {
+		return
+	}
+	compat := e.resolveCompatConfig(auth)
+	if compat == nil || len(compat.Headers) == 0 {
+		return
+	}
+	util.ApplyHeaderMapExcept(req.Header, compat.Headers, "Authorization")
+}
+
+func (e *OpenAICompatExecutor) applyGlobalForwardHeaders(req *http.Request) {
+	if req == nil || e == nil || e.cfg == nil {
+		return
+	}
+	util.ApplyHeaderMapExcept(req.Header, e.cfg.ForwardRequestHeaders, "Authorization")
+}
+
+func (e *OpenAICompatExecutor) applyAuthHeaders(req *http.Request, auth *cliproxyauth.Auth) {
+	if req == nil {
+		return
 	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(req, attrs)
-	return nil
+	util.ApplyCustomHeadersFromAttrsExcept(req, attrs, "Authorization")
+}
+
+func (e *OpenAICompatExecutor) applyUpstreamHeaders(req *http.Request, auth *cliproxyauth.Auth) {
+	e.applyAuthHeaders(req, auth)
+	e.applyGlobalForwardHeaders(req)
+	e.applyConfigHeaders(req, auth)
+}
+
+func (e *OpenAICompatExecutor) prepareUpstreamRequest(req *http.Request, auth *cliproxyauth.Auth, apiKey string) {
+	if req == nil {
+		return
+	}
+	e.applyUpstreamHeaders(req, auth)
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 }
 
 // HttpRequest injects OpenAI-compatible credentials into the request and executes it.
@@ -63,9 +101,8 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 		ctx = req.Context()
 	}
 	httpReq := req.WithContext(ctx)
-	if err := e.PrepareRequest(httpReq, auth); err != nil {
-		return nil, err
-	}
+	_, apiKey := e.resolveCredentials(auth)
+	e.prepareUpstreamRequest(httpReq, auth, apiKey)
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
@@ -115,15 +152,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
 	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
-	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	e.prepareUpstreamRequest(httpReq, auth, apiKey)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -216,15 +246,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
 	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
-	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	e.prepareUpstreamRequest(httpReq, auth, apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string

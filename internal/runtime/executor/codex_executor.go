@@ -727,7 +727,17 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	util.ApplyCustomHeadersFromAttrsExcept(r, attrs, "Authorization")
+	if cfg != nil {
+		util.ApplyHeaderMapExcept(r.Header, cfg.ForwardRequestHeaders, "Authorization")
+	}
+	codexCfg := resolveCodexConfigForWebsocket(auth, cfg)
+	if codexCfg != nil {
+		util.ApplyHeaderMapExcept(r.Header, codexCfg.Headers, "Authorization")
+	}
+	if strings.TrimSpace(token) != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
