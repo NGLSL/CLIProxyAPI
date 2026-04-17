@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -336,6 +337,237 @@ func TestServiceShutdownFlushUsageAndPersistSavesDrainedRecords(t *testing.T) {
 	}
 }
 
+func TestServiceRunRestoresStoredAuthRuntimeSnapshotAndRegistersModels(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	authDir := filepath.Join(tmpDir, "auth")
+	authID := "stored-auth"
+	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	nextRetryAfter := now.Add(10 * time.Minute)
+	nextRecoverAt := now.Add(20 * time.Minute)
+
+	t.Cleanup(func() {
+		GlobalModelRegistry().UnregisterClient(authID)
+	})
+
+	service := &Service{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{},
+			Port:      0,
+			AuthDir:   authDir,
+		},
+		configPath:     configPath,
+		tokenProvider:  stubTokenClientProvider{},
+		apiKeyProvider: stubAPIKeyClientProvider{},
+		watcherFactory: stubWatcherFactory,
+		accessManager:  sdkaccess.NewManager(),
+		coreManager: coreauth.NewManager(&testCoreAuthStore{items: []*coreauth.Auth{{
+			ID:       authID,
+			Provider: "claude",
+			Status:   coreauth.StatusActive,
+		}}}, nil, nil),
+		hooks: Hooks{
+			OnAfterStart: func(s *Service) {
+				time.AfterFunc(200*time.Millisecond, func() {
+					_ = s.Shutdown(context.Background())
+				})
+			},
+		},
+	}
+
+	if err := coreauth.SaveRuntimeSnapshotToFile(service.authRuntimeSnapshotPath(), coreauth.RuntimeSnapshot{Auths: map[string]*coreauth.AuthRuntimeState{
+		authID: {
+			Status:         coreauth.StatusError,
+			StatusMessage:  "cooldown",
+			Unavailable:    true,
+			NextRetryAfter: nextRetryAfter,
+			LastError:      &coreauth.Error{Code: "rate_limit", Message: "retry later", Retryable: true, HTTPStatus: 429},
+			UpdatedAt:      now,
+			Quota:          coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: nextRecoverAt, BackoffLevel: 2},
+		},
+	}}); err != nil {
+		t.Fatalf("SaveRuntimeSnapshotToFile() error = %v", err)
+	}
+
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	auth, ok := service.coreManager.GetByID(authID)
+	if !ok || auth == nil {
+		t.Fatalf("expected stored auth to be loaded")
+	}
+	if !auth.Unavailable {
+		t.Fatalf("expected stored auth to restore unavailable state")
+	}
+	if !auth.NextRetryAfter.Equal(nextRetryAfter) {
+		t.Fatalf("auth.NextRetryAfter = %v, want %v", auth.NextRetryAfter, nextRetryAfter)
+	}
+	if !auth.Quota.Exceeded {
+		t.Fatalf("expected stored auth quota state to be restored")
+	}
+	if got := len(registry.GetGlobalRegistry().GetModelsForClient(authID)); got == 0 {
+		t.Fatalf("expected stored auth models to be registered after load")
+	}
+}
+
+func TestServiceRestoreWatcherSnapshotAuthsRestoresRuntimeSnapshotForWatcherAuth(t *testing.T) {
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	authID := "watcher-auth"
+	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	nextRetryAfter := now.Add(10 * time.Minute)
+
+	t.Cleanup(func() {
+		GlobalModelRegistry().UnregisterClient(authID)
+	})
+
+	service.setAuthRuntimeSnapshot(coreauth.RuntimeSnapshot{Auths: map[string]*coreauth.AuthRuntimeState{
+		authID: {
+			Status:         coreauth.StatusError,
+			StatusMessage:  "cooldown",
+			Unavailable:    true,
+			NextRetryAfter: nextRetryAfter,
+			LastError:      &coreauth.Error{Code: "rate_limit", Message: "retry later", Retryable: true, HTTPStatus: 429},
+			UpdatedAt:      now,
+		},
+	}})
+	service.watcher = &WatcherWrapper{snapshotAuths: func() []*coreauth.Auth {
+		return []*coreauth.Auth{{
+			ID:       authID,
+			Provider: "claude",
+			Status:   coreauth.StatusActive,
+		}}
+	}}
+
+	service.restoreWatcherSnapshotAuths()
+
+	updated, ok := service.coreManager.GetByID(authID)
+	if !ok || updated == nil {
+		t.Fatalf("expected watcher auth to be present")
+	}
+	if !updated.Unavailable {
+		t.Fatalf("expected watcher auth to restore unavailable state")
+	}
+	if !updated.NextRetryAfter.Equal(nextRetryAfter) {
+		t.Fatalf("updated.NextRetryAfter = %v, want %v", updated.NextRetryAfter, nextRetryAfter)
+	}
+}
+
+func TestServiceReloadRestoreDoesNotOverrideFresherRuntimeState(t *testing.T) {
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	authID := "reload-auth"
+	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	currentRetryAfter := now.Add(5 * time.Minute)
+	snapshotRetryAfter := now.Add(30 * time.Minute)
+
+	if _, err := service.coreManager.Register(context.Background(), &coreauth.Auth{
+		ID:             authID,
+		Provider:       "claude",
+		Status:         coreauth.StatusError,
+		StatusMessage:  "current state",
+		Unavailable:    true,
+		NextRetryAfter: currentRetryAfter,
+		LastError:      &coreauth.Error{Code: "current", Message: "current state", Retryable: true, HTTPStatus: 429},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	service.setAuthRuntimeSnapshot(coreauth.RuntimeSnapshot{Auths: map[string]*coreauth.AuthRuntimeState{
+		authID: {
+			Status:         coreauth.StatusError,
+			StatusMessage:  "stale snapshot",
+			Unavailable:    true,
+			NextRetryAfter: snapshotRetryAfter,
+			LastError:      &coreauth.Error{Code: "snapshot", Message: "stale snapshot", Retryable: true, HTTPStatus: 429},
+		},
+	}})
+
+	if service.restoreAuthRuntimeSnapshotForAuth(authID) {
+		t.Fatalf("expected stale snapshot to be ignored")
+	}
+
+	updated, ok := service.coreManager.GetByID(authID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain present")
+	}
+	if updated.StatusMessage != "current state" {
+		t.Fatalf("updated.StatusMessage = %q, want current state", updated.StatusMessage)
+	}
+	if !updated.NextRetryAfter.Equal(currentRetryAfter) {
+		t.Fatalf("updated.NextRetryAfter = %v, want %v", updated.NextRetryAfter, currentRetryAfter)
+	}
+	if updated.LastError == nil || updated.LastError.Code != "current" {
+		t.Fatalf("updated.LastError = %#v, want current", updated.LastError)
+	}
+}
+
+func TestServiceShutdownPersistsAuthRuntimeSnapshot(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	authID := "shutdown-auth"
+	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	nextRetryAfter := now.Add(10 * time.Minute)
+
+	service := &Service{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{},
+			Port:      0,
+			AuthDir:   filepath.Join(tmpDir, "auth"),
+		},
+		configPath:     configPath,
+		tokenProvider:  stubTokenClientProvider{},
+		apiKeyProvider: stubAPIKeyClientProvider{},
+		watcherFactory: stubWatcherFactory,
+		accessManager:  sdkaccess.NewManager(),
+		coreManager:    coreauth.NewManager(nil, nil, nil),
+	}
+
+	if _, err := service.coreManager.Register(context.Background(), &coreauth.Auth{
+		ID:             authID,
+		Provider:       "claude",
+		Status:         coreauth.StatusError,
+		StatusMessage:  "cooldown",
+		Unavailable:    true,
+		NextRetryAfter: nextRetryAfter,
+		LastError:      &coreauth.Error{Code: "rate_limit", Message: "retry later", Retryable: true, HTTPStatus: 429},
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	service.startAuthRuntimePersistence(context.Background())
+	if err := service.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+
+	loaded, err := coreauth.LoadRuntimeSnapshotFromFile(service.authRuntimeSnapshotPath())
+	if err != nil {
+		t.Fatalf("LoadRuntimeSnapshotFromFile() error = %v", err)
+	}
+	state := loaded.Auths[authID]
+	if state == nil {
+		t.Fatalf("expected persisted auth runtime snapshot")
+	}
+	if !state.Unavailable {
+		t.Fatalf("expected persisted snapshot to keep unavailable state")
+	}
+	if !state.NextRetryAfter.Equal(nextRetryAfter) {
+		t.Fatalf("state.NextRetryAfter = %v, want %v", state.NextRetryAfter, nextRetryAfter)
+	}
+}
+
 type stubTokenClientProvider struct{}
 
 func (stubTokenClientProvider) Load(context.Context, *config.Config) (*TokenClientResult, error) {
@@ -350,4 +582,49 @@ func (stubAPIKeyClientProvider) Load(context.Context, *config.Config) (*APIKeyCl
 
 func stubWatcherFactory(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error) {
 	return &WatcherWrapper{}, nil
+}
+
+type testCoreAuthStore struct {
+	mu    sync.Mutex
+	items []*coreauth.Auth
+}
+
+func (s *testCoreAuthStore) List(context.Context) ([]*coreauth.Auth, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*coreauth.Auth, 0, len(s.items))
+	for _, item := range s.items {
+		out = append(out, item.Clone())
+	}
+	return out, nil
+}
+
+func (s *testCoreAuthStore) Save(_ context.Context, auth *coreauth.Auth) (string, error) {
+	if auth == nil {
+		return "", nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.items {
+		if item != nil && item.ID == auth.ID {
+			s.items[i] = auth.Clone()
+			return auth.ID, nil
+		}
+	}
+	s.items = append(s.items, auth.Clone())
+	return auth.ID, nil
+}
+
+func (s *testCoreAuthStore) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	filtered := s.items[:0]
+	for _, item := range s.items {
+		if item == nil || item.ID == id {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	s.items = filtered
+	return nil
 }

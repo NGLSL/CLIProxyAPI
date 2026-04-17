@@ -90,11 +90,16 @@ type Service struct {
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
 
-	usagePersistenceCancel context.CancelFunc
-	usagePersistenceDone   chan struct{}
+	usagePersistenceCancel       context.CancelFunc
+	usagePersistenceDone         chan struct{}
+	authRuntimePersistenceCancel context.CancelFunc
+	authRuntimePersistenceDone   chan struct{}
+	authRuntimeSnapshotMu        sync.RWMutex
+	authRuntimeSnapshot          coreauth.RuntimeSnapshot
 }
 
 const usagePersistenceInterval = time.Minute
+const authRuntimePersistenceInterval = time.Minute
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
@@ -212,6 +217,13 @@ func (s *Service) usageSnapshotPath() string {
 	return internalusage.DefaultSnapshotPath(s.configPath)
 }
 
+func (s *Service) authRuntimeSnapshotPath() string {
+	if s == nil {
+		return ""
+	}
+	return coreauth.DefaultRuntimeSnapshotPath(s.configPath)
+}
+
 func (s *Service) configureUsageStatisticsEnabled() bool {
 	enabled := s != nil && s.cfg != nil && s.cfg.UsageStatisticsEnabled
 	internalusage.SetStatisticsEnabled(enabled)
@@ -257,6 +269,192 @@ func (s *Service) persistUsageSnapshot() error {
 		return fmt.Errorf("persist usage snapshot to %s: %w", path, err)
 	}
 	return nil
+}
+
+func (s *Service) setAuthRuntimeSnapshot(snapshot coreauth.RuntimeSnapshot) {
+	if s == nil {
+		return
+	}
+	s.authRuntimeSnapshotMu.Lock()
+	defer s.authRuntimeSnapshotMu.Unlock()
+	s.authRuntimeSnapshot = snapshot.Clone()
+}
+
+func (s *Service) authRuntimeSnapshotState() coreauth.RuntimeSnapshot {
+	if s == nil {
+		return coreauth.RuntimeSnapshot{}
+	}
+	s.authRuntimeSnapshotMu.RLock()
+	defer s.authRuntimeSnapshotMu.RUnlock()
+	return s.authRuntimeSnapshot.Clone()
+}
+
+func (s *Service) restoreAuthRuntimeSnapshot() coreauth.RuntimeSnapshot {
+	if s == nil {
+		return coreauth.RuntimeSnapshot{}
+	}
+
+	path := s.authRuntimeSnapshotPath()
+	if path == "" {
+		return coreauth.RuntimeSnapshot{}
+	}
+
+	snapshot, err := coreauth.LoadRuntimeSnapshotFromFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return coreauth.RuntimeSnapshot{}
+		}
+		log.Warnf("failed to restore auth runtime snapshot from %s: %v", path, err)
+		return coreauth.RuntimeSnapshot{}
+	}
+
+	s.setAuthRuntimeSnapshot(snapshot)
+	if snapshot.Len() > 0 {
+		log.Infof("restored auth runtime snapshot from %s (auths=%d)", path, snapshot.Len())
+	}
+	return snapshot
+}
+
+func (s *Service) applyAuthRuntimeSnapshot(snapshot coreauth.RuntimeSnapshot) []string {
+	if s == nil || s.coreManager == nil || snapshot.Len() == 0 {
+		return nil
+	}
+	applied := s.coreManager.ApplyRuntimeSnapshot(snapshot, time.Now())
+	if len(applied) == 0 {
+		return nil
+	}
+	for _, authID := range applied {
+		s.coreManager.RefreshSchedulerEntry(authID)
+	}
+	return applied
+}
+
+func (s *Service) persistAuthRuntimeSnapshot() error {
+	if s == nil || s.coreManager == nil {
+		return nil
+	}
+
+	path := s.authRuntimeSnapshotPath()
+	if path == "" {
+		return nil
+	}
+
+	snapshot := s.coreManager.ExportRuntimeSnapshot(time.Now())
+	s.setAuthRuntimeSnapshot(snapshot)
+	if err := coreauth.SaveRuntimeSnapshotToFile(path, snapshot); err != nil {
+		return fmt.Errorf("persist auth runtime snapshot to %s: %w", path, err)
+	}
+	return nil
+}
+
+func (s *Service) startAuthRuntimePersistence(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if s.authRuntimeSnapshotPath() == "" || s.authRuntimePersistenceCancel != nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	s.authRuntimePersistenceCancel = cancel
+	s.authRuntimePersistenceDone = done
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(authRuntimePersistenceInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				if err := s.persistAuthRuntimeSnapshot(); err != nil {
+					log.Warnf("failed to persist auth runtime snapshot: %v", err)
+				}
+			}
+		}
+	}()
+}
+
+func (s *Service) stopAuthRuntimePersistence() {
+	if s == nil {
+		return
+	}
+	if s.authRuntimePersistenceCancel != nil {
+		s.authRuntimePersistenceCancel()
+		s.authRuntimePersistenceCancel = nil
+	}
+	if s.authRuntimePersistenceDone != nil {
+		<-s.authRuntimePersistenceDone
+		s.authRuntimePersistenceDone = nil
+	}
+}
+
+func (s *Service) flushAuthRuntimePersist() {
+	if s == nil {
+		return
+	}
+	if err := s.persistAuthRuntimeSnapshot(); err != nil {
+		log.Warnf("failed to persist auth runtime snapshot during shutdown: %v", err)
+	}
+}
+
+func (s *Service) restoreAuthRuntimeSnapshotForAuth(authID string) bool {
+	if s == nil || s.coreManager == nil || authID == "" {
+		return false
+	}
+	snapshot := s.authRuntimeSnapshotState()
+	state, ok := snapshot.Auths[authID]
+	if !ok || state == nil {
+		return false
+	}
+	applied := s.applyAuthRuntimeSnapshot(coreauth.RuntimeSnapshot{Auths: map[string]*coreauth.AuthRuntimeState{authID: state}})
+	return len(applied) > 0
+}
+
+func (s *Service) restoreAuthRuntimeSnapshotForWatcherAuths(auths []*coreauth.Auth) {
+	if s == nil || len(auths) == 0 {
+		return
+	}
+	for _, auth := range auths {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		s.restoreAuthRuntimeSnapshotForAuth(auth.ID)
+	}
+}
+
+func (s *Service) reapplyAllModelRegistrations() {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	for _, auth := range s.coreManager.List() {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		s.registerModelsForAuth(auth)
+		s.coreManager.RefreshSchedulerEntry(auth.ID)
+	}
+}
+
+func (s *Service) restoreWatcherSnapshotAuths() {
+	if s == nil || s.watcher == nil {
+		return
+	}
+	auths := s.watcher.SnapshotAuths()
+	if len(auths) == 0 {
+		return
+	}
+	for _, auth := range auths {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		s.applyCoreAuthAddOrUpdate(context.Background(), auth)
+	}
+	s.restoreAuthRuntimeSnapshotForWatcherAuths(auths)
 }
 
 func (s *Service) startUsagePersistence(ctx context.Context) {
@@ -429,7 +627,6 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	// This operation may block on network calls, but the auth configuration
 	// is already effective at this point.
 	s.registerModelsForAuth(auth)
-	s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
 
 	// Refresh the scheduler entry so that the auth's supportedModelSet is rebuilt
 	// from the now-populated global model registry. Without this, newly added auths
@@ -621,10 +818,20 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.applyRetryConfig(s.cfg)
 
+	runtimeSnapshot := s.restoreAuthRuntimeSnapshot()
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
+		} else {
+			s.reapplyAllModelRegistrations()
+			applied := s.applyAuthRuntimeSnapshot(runtimeSnapshot)
+			if len(applied) > 0 {
+				log.Infof("applied auth runtime snapshot to %d stored auth(s)", len(applied))
+			}
 		}
+	}
+	if s.coreManager != nil {
+		s.startAuthRuntimePersistence(ctx)
 	}
 
 	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
@@ -797,6 +1004,12 @@ func (s *Service) Run(ctx context.Context) error {
 		if s.coreManager != nil {
 			s.coreManager.SetConfig(newCfg)
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+			runtimeSnapshot := s.restoreAuthRuntimeSnapshot()
+			s.restoreWatcherSnapshotAuths()
+			if len(s.applyAuthRuntimeSnapshot(runtimeSnapshot)) == 0 {
+				s.reapplyAllModelRegistrations()
+			}
+			s.startAuthRuntimePersistence(context.Background())
 		}
 		s.rebindExecutors()
 	}
@@ -818,6 +1031,7 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
 	}
 	log.Info("file watcher started for config and auth directory changes")
+	s.restoreWatcherSnapshotAuths()
 
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil {
@@ -902,7 +1116,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		s.stopUsagePersistence()
+		s.stopAuthRuntimePersistence()
 		s.flushUsageAndPersist()
+		s.flushAuthRuntimePersist()
 	})
 	return shutdownErr
 }
@@ -1160,7 +1376,6 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 		s.ensureExecutorsForAuth(current)
 	}
 	s.registerModelsForAuth(current)
-	s.coreManager.ReconcileRegistryModelStates(context.Background(), current.ID)
 
 	latest, ok := s.latestAuthForModelRegistration(current.ID)
 	if !ok || latest.Disabled {
@@ -1174,7 +1389,6 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 	// no auth fields changed, but keeps the refresh path simple and correct.
 	s.ensureExecutorsForAuth(latest)
 	s.registerModelsForAuth(latest)
-	s.coreManager.ReconcileRegistryModelStates(context.Background(), latest.ID)
 	s.coreManager.RefreshSchedulerEntry(current.ID)
 	return true
 }

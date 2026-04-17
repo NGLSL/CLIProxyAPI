@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestManager_Update_PreservesModelStates(t *testing.T) {
@@ -10,6 +11,9 @@ func TestManager_Update_PreservesModelStates(t *testing.T) {
 
 	model := "test-model"
 	backoffLevel := 7
+	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	nextRetryAfter := now.Add(10 * time.Minute)
+	nextRecoverAt := now.Add(20 * time.Minute)
 
 	if _, errRegister := m.Register(context.Background(), &Auth{
 		ID:       "auth-1",
@@ -17,7 +21,13 @@ func TestManager_Update_PreservesModelStates(t *testing.T) {
 		Metadata: map[string]any{"k": "v"},
 		ModelStates: map[string]*ModelState{
 			model: {
-				Quota: QuotaState{BackoffLevel: backoffLevel},
+				Status:         StatusError,
+				StatusMessage:  "cooldown",
+				Unavailable:    true,
+				NextRetryAfter: nextRetryAfter,
+				LastError:      &Error{Code: "rate_limit", Message: "retry later", Retryable: true, HTTPStatus: 429},
+				Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: nextRecoverAt, BackoffLevel: backoffLevel},
+				UpdatedAt:      now,
 			},
 		},
 	}); errRegister != nil {
@@ -163,6 +173,9 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 
 	model := "active-model"
 	backoffLevel := 3
+	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	nextRetryAfter := now.Add(5 * time.Minute)
+	nextRecoverAt := now.Add(15 * time.Minute)
 
 	// Register an active auth with ModelStates.
 	if _, err := m.Register(context.Background(), &Auth{
@@ -171,7 +184,13 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 		Status:   StatusActive,
 		ModelStates: map[string]*ModelState{
 			model: {
-				Quota: QuotaState{BackoffLevel: backoffLevel},
+				Status:         StatusError,
+				StatusMessage:  "cooldown",
+				Unavailable:    true,
+				NextRetryAfter: nextRetryAfter,
+				LastError:      &Error{Code: "model_rate_limit", Message: "busy", Retryable: true, HTTPStatus: 429},
+				Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: nextRecoverAt, BackoffLevel: backoffLevel},
+				UpdatedAt:      now,
 			},
 		},
 	}); err != nil {
