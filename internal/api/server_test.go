@@ -13,6 +13,7 @@ import (
 
 	proxyconfig "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/NGLSL/CLIProxyAPI/v6/sdk/access"
 	"github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
@@ -107,13 +108,29 @@ func TestHealthz(t *testing.T) {
 	}
 
 	var resp struct {
-		Status string `json:"status"`
+		Status                  string `json:"status"`
+		ManagementRoutesEnabled bool   `json:"management_routes_enabled"`
+		UsageStatisticsEnabled  bool   `json:"usage_statistics_enabled"`
+		Version                 string `json:"version"`
+		BuildDate               string `json:"build_date"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
 	}
 	if resp.Status != "ok" {
 		t.Fatalf("unexpected response status: got %q want %q", resp.Status, "ok")
+	}
+	if resp.ManagementRoutesEnabled {
+		t.Fatalf("unexpected management routes state: got %t want %t", resp.ManagementRoutesEnabled, false)
+	}
+	if resp.UsageStatisticsEnabled != usage.StatisticsEnabled() {
+		t.Fatalf("unexpected usage statistics state: got %t want %t", resp.UsageStatisticsEnabled, usage.StatisticsEnabled())
+	}
+	if resp.Version == "" {
+		t.Fatal("expected version to be present in healthz response")
+	}
+	if resp.BuildDate == "" {
+		t.Fatal("expected build_date to be present in healthz response")
 	}
 }
 

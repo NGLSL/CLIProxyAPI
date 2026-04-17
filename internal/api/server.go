@@ -23,6 +23,7 @@ import (
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/NGLSL/CLIProxyAPI/v6/internal/api/modules/amp"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/cache"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
@@ -316,11 +317,21 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	return s
 }
 
+func (s *Server) healthzResponse() gin.H {
+	return gin.H{
+		"status":                    "ok",
+		"management_routes_enabled": s.managementRoutesEnabled.Load(),
+		"usage_statistics_enabled":  usage.StatisticsEnabled(),
+		"version":                   buildinfo.Version,
+		"build_date":                buildinfo.BuildDate,
+	}
+}
+
 // setupRoutes configures the API routes for the server.
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
 	s.engine.GET("/healthz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		c.JSON(http.StatusOK, s.healthzResponse())
 	})
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
