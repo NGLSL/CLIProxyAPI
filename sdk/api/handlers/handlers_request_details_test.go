@@ -10,33 +10,52 @@ import (
 	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
 )
 
+type requestDetailsTestClient struct {
+	id       string
+	provider string
+	models   []*registry.ModelInfo
+}
+
+func registerClientsForRequestDetailsTests(t *testing.T, modelRegistry *registry.ModelRegistry, clients []*requestDetailsTestClient) {
+	t.Helper()
+
+	for _, client := range clients {
+		modelRegistry.RegisterClient(client.id, client.provider, client.models)
+		clientID := client.id
+		t.Cleanup(func() {
+			modelRegistry.UnregisterClient(clientID)
+		})
+	}
+}
+
 func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	now := time.Now().Unix()
 
-	modelRegistry.RegisterClient("test-request-details-gemini", "gemini", []*registry.ModelInfo{
-		{ID: "gemini-2.5-pro", Created: now + 30},
-		{ID: "gemini-2.5-flash", Created: now + 25},
+	registerClientsForRequestDetailsTests(t, modelRegistry, []*requestDetailsTestClient{
+		{
+			id:       "test-request-details-gemini",
+			provider: "gemini",
+			models: []*registry.ModelInfo{
+				{ID: "gemini-2.5-pro", Created: now + 30},
+				{ID: "gemini-2.5-flash", Created: now + 25},
+			},
+		},
+		{
+			id:       "test-request-details-openai",
+			provider: "openai",
+			models: []*registry.ModelInfo{
+				{ID: "gpt-5.2", Created: now + 20},
+			},
+		},
+		{
+			id:       "test-request-details-claude",
+			provider: "claude",
+			models: []*registry.ModelInfo{
+				{ID: "claude-sonnet-4-5", Created: now + 5},
+			},
+		},
 	})
-	modelRegistry.RegisterClient("test-request-details-openai", "openai", []*registry.ModelInfo{
-		{ID: "gpt-5.2", Created: now + 20},
-	})
-	modelRegistry.RegisterClient("test-request-details-claude", "claude", []*registry.ModelInfo{
-		{ID: "claude-sonnet-4-5", Created: now + 5},
-	})
-
-	// Ensure cleanup of all test registrations.
-	clientIDs := []string{
-		"test-request-details-gemini",
-		"test-request-details-openai",
-		"test-request-details-claude",
-	}
-	for _, clientID := range clientIDs {
-		id := clientID
-		t.Cleanup(func() {
-			modelRegistry.UnregisterClient(id)
-		})
-	}
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 
@@ -114,5 +133,103 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 				t.Fatalf("getRequestDetails() model = %v, want %v", model, tt.wantModel)
 			}
 		})
+	}
+}
+
+func TestGetRequestDetails_MergesBaseAndResolvedModelProviders(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+
+	registerClientsForRequestDetailsTests(t, modelRegistry, []*requestDetailsTestClient{
+		{
+			id:       "test-request-details-merge-base",
+			provider: "openai",
+			models: []*registry.ModelInfo{
+				{ID: "gpt-5.4", Created: now + 20},
+			},
+		},
+		{
+			id:       "test-request-details-merge-full",
+			provider: "openai-compatibility",
+			models: []*registry.ModelInfo{
+				{ID: "gpt-5.4(xhigh)", Created: now + 10},
+			},
+		},
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	providers, model, errMsg := handler.getRequestDetails("gpt-5.4(xhigh)")
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() error = %v, want nil", errMsg)
+	}
+	if !reflect.DeepEqual(providers, []string{"openai", "openai-compatibility"}) {
+		t.Fatalf("getRequestDetails() providers = %v, want %v", providers, []string{"openai", "openai-compatibility"})
+	}
+	if model != "gpt-5.4(xhigh)" {
+		t.Fatalf("getRequestDetails() model = %v, want %v", model, "gpt-5.4(xhigh)")
+	}
+}
+
+func TestGetRequestDetails_DeduplicatesMergedProviders(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+
+	registerClientsForRequestDetailsTests(t, modelRegistry, []*requestDetailsTestClient{
+		{
+			id:       "test-request-details-dedupe-base",
+			provider: "openai",
+			models: []*registry.ModelInfo{
+				{ID: "gpt-5.4", Created: now + 20},
+			},
+		},
+		{
+			id:       "test-request-details-dedupe-full",
+			provider: "openai",
+			models: []*registry.ModelInfo{
+				{ID: "gpt-5.4(xhigh)", Created: now + 10},
+			},
+		},
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	providers, model, errMsg := handler.getRequestDetails("gpt-5.4(xhigh)")
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() error = %v, want nil", errMsg)
+	}
+	if !reflect.DeepEqual(providers, []string{"openai"}) {
+		t.Fatalf("getRequestDetails() providers = %v, want %v", providers, []string{"openai"})
+	}
+	if model != "gpt-5.4(xhigh)" {
+		t.Fatalf("getRequestDetails() model = %v, want %v", model, "gpt-5.4(xhigh)")
+	}
+}
+
+func TestGetRequestDetails_UsesResolvedModelProvidersWhenBaseModelIsMissing(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+
+	registerClientsForRequestDetailsTests(t, modelRegistry, []*requestDetailsTestClient{
+		{
+			id:       "test-request-details-full-only",
+			provider: "openai-compatibility",
+			models: []*registry.ModelInfo{
+				{ID: "gpt-5.4(xhigh)", Created: now + 10},
+			},
+		},
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	providers, model, errMsg := handler.getRequestDetails("gpt-5.4(xhigh)")
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() error = %v, want nil", errMsg)
+	}
+	if !reflect.DeepEqual(providers, []string{"openai-compatibility"}) {
+		t.Fatalf("getRequestDetails() providers = %v, want %v", providers, []string{"openai-compatibility"})
+	}
+	if model != "gpt-5.4(xhigh)" {
+		t.Fatalf("getRequestDetails() model = %v, want %v", model, "gpt-5.4(xhigh)")
 	}
 }

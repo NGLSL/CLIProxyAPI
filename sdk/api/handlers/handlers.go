@@ -820,13 +820,24 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
 	providers = util.GetProviderName(baseModel)
-	// Fallback: if baseModel has no provider but differs from resolvedModelName,
-	// try using the full model name. This handles edge cases where custom models
-	// may be registered with their full suffixed name (e.g., "my-model(8192)").
-	// Evaluated in Story 11.8: This fallback is intentionally preserved to support
-	// custom model registrations that include thinking suffixes.
-	if len(providers) == 0 && baseModel != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
+	if baseModel != resolvedModelName {
+		resolvedProviders := util.GetProviderName(resolvedModelName)
+		if len(resolvedProviders) > 0 {
+			mergedProviders := make([]string, 0, len(providers)+len(resolvedProviders))
+			seenProviders := make(map[string]struct{}, len(providers)+len(resolvedProviders))
+			appendUniqueProviders := func(names []string) {
+				for _, name := range names {
+					if _, exists := seenProviders[name]; exists {
+						continue
+					}
+					seenProviders[name] = struct{}{}
+					mergedProviders = append(mergedProviders, name)
+				}
+			}
+			appendUniqueProviders(providers)
+			appendUniqueProviders(resolvedProviders)
+			providers = mergedProviders
+		}
 	}
 
 	if len(providers) == 0 {
