@@ -53,7 +53,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/cache"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -73,10 +73,8 @@ type claudeSignatureTree struct {
 	HasField7           bool
 }
 
-// StripInvalidSignatureThinkingBlocks removes thinking blocks whose signatures
-// are empty or not valid Claude format (must start with 'E' or 'R' after
-// stripping any cache prefix). These come from proxy-generated responses
-// (Antigravity/Gemini) where no real Claude signature exists.
+// StripEmptySignatureThinkingBlocks removes thinking blocks whose signatures
+// are empty after trimming whitespace and any optional cache prefix.
 func StripEmptySignatureThinkingBlocks(payload []byte) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.IsArray() {
@@ -91,7 +89,7 @@ func StripEmptySignatureThinkingBlocks(payload []byte) []byte {
 		var kept []string
 		stripped := false
 		for _, part := range content.Array() {
-			if part.Get("type").String() == "thinking" && !hasValidClaudeSignature(part.Get("signature").String()) {
+			if part.Get("type").String() == "thinking" && !hasNonEmptyClaudeSignature(part.Get("signature").String()) {
 				stripped = true
 				continue
 			}
@@ -112,10 +110,7 @@ func StripEmptySignatureThinkingBlocks(payload []byte) []byte {
 	return payload
 }
 
-// hasValidClaudeSignature returns true if sig looks like a real Claude thinking
-// signature: non-empty and starts with 'E' or 'R' (after stripping optional
-// cache prefix like "modelGroup#").
-func hasValidClaudeSignature(sig string) bool {
+func hasNonEmptyClaudeSignature(sig string) bool {
 	sig = strings.TrimSpace(sig)
 	if sig == "" {
 		return false
@@ -123,10 +118,7 @@ func hasValidClaudeSignature(sig string) bool {
 	if idx := strings.IndexByte(sig, '#'); idx >= 0 {
 		sig = strings.TrimSpace(sig[idx+1:])
 	}
-	if sig == "" {
-		return false
-	}
-	return sig[0] == 'E' || sig[0] == 'R'
+	return sig != ""
 }
 
 func ValidateClaudeBypassSignatures(inputRawJSON []byte) error {

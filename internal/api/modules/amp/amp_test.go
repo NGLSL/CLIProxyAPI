@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/api/modules"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+	sdkaccess "github.com/NGLSL/CLIProxyAPI/v6/sdk/access"
+	"github.com/NGLSL/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 )
 
 func TestAmpModule_Name(t *testing.T) {

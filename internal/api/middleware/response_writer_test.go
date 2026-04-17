@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 )
 
 func TestExtractRequestBodyPrefersOverride(t *testing.T) {

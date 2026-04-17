@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	coreusage "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/gin-gonic/gin"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 var statisticsEnabled atomic.Bool

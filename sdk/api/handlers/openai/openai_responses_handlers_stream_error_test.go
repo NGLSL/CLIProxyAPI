@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/NGLSL/CLIProxyAPI/v6/sdk/api/handlers"
+	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
 func TestForwardResponsesStreamTerminalErrorUsesResponsesErrorChunk(t *testing.T) {

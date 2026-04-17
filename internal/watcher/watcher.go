@@ -9,12 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
 	"github.com/fsnotify/fsnotify"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"gopkg.in/yaml.v3"
 
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	sdkAuth "github.com/NGLSL/CLIProxyAPI/v6/sdk/auth"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 

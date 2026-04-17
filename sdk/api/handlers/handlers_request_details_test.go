@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
 )
 
 func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
