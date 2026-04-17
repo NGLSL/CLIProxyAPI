@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,53 @@ import (
 	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
 	gin "github.com/gin-gonic/gin"
 )
+
+type stubAccessProvider struct {
+	result *sdkaccess.Result
+	err    *sdkaccess.AuthError
+}
+
+func (p *stubAccessProvider) Identifier() string {
+	return "stub"
+}
+
+func (p *stubAccessProvider) Authenticate(_ context.Context, _ *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
+	return p.result, p.err
+}
+
+func newTestAccessManager(result *sdkaccess.Result, err *sdkaccess.AuthError) *sdkaccess.Manager {
+	manager := sdkaccess.NewManager()
+	manager.SetProviders([]sdkaccess.Provider{&stubAccessProvider{result: result, err: err}})
+	return manager
+}
+
+func TestAuthMiddleware_SetsAccessIndex(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	accessManager := newTestAccessManager(&sdkaccess.Result{Provider: "config-inline", Principal: "account-a"}, nil)
+	engine := gin.New()
+	engine.Use(AuthMiddleware(accessManager))
+	engine.GET("/", func(c *gin.Context) {
+		got, ok := c.Get("accessIndex")
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "missing accessIndex"})
+			return
+		}
+		value, _ := got.(string)
+		c.JSON(http.StatusOK, gin.H{"accessIndex": value})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	want := sdkaccess.StableIndex("config-inline", "account-a")
+	if !strings.Contains(rr.Body.String(), want) {
+		t.Fatalf("response body missing access index %q: %s", want, rr.Body.String())
+	}
+}
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()

@@ -286,6 +286,8 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 		return "round-robin", true
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first", true
+	case "sticky-round-robin", "sticky-roundrobin", "stickyroundrobin", "srr":
+		return "sticky-round-robin", true
 	default:
 		return "", false
 	}

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -22,6 +23,7 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+	DefaultRoutingStickyTTL      = 1800
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -214,8 +216,10 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "fill-first", "sticky-round-robin".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	// StickyTTL controls how long sticky-round-robin bindings remain valid, in seconds.
+	StickyTTL int `yaml:"sticky-ttl,omitempty" json:"sticky-ttl,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -592,6 +596,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.Routing.StickyTTL = DefaultRoutingStickyTTL
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -638,6 +643,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {
 		cfg.Pprof.Addr = DefaultPprofAddr
+	}
+
+	if cfg.Routing.StickyTTL <= 0 {
+		cfg.Routing.StickyTTL = DefaultRoutingStickyTTL
 	}
 
 	if cfg.LogsMaxTotalSizeMB < 0 {
@@ -1331,6 +1340,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
+		case "routing.sticky-ttl":
+			return node.Value == strconv.Itoa(DefaultRoutingStickyTTL)
 		}
 	}
 

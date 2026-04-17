@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	internalconfig "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -18,6 +19,7 @@ const (
 	schedulerStrategyCustom schedulerStrategy = iota
 	schedulerStrategyRoundRobin
 	schedulerStrategyFillFirst
+	schedulerStrategyStickyRoundRobin
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -32,11 +34,18 @@ const (
 
 // authScheduler keeps the incremental provider/model scheduling state used by Manager.
 type authScheduler struct {
-	mu            sync.Mutex
-	strategy      schedulerStrategy
-	providers     map[string]*providerScheduler
-	authProviders map[string]string
-	mixedCursors  map[string]int
+	mu             sync.Mutex
+	strategy       schedulerStrategy
+	providers      map[string]*providerScheduler
+	authProviders  map[string]string
+	mixedCursors   map[string]int
+	stickyBindings map[string]stickyAuthBinding
+	stickyTTL      time.Duration
+}
+
+type stickyAuthBinding struct {
+	authID    string
+	expiresAt time.Time
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
@@ -166,10 +175,12 @@ func normalizeCursor(cursor, size int) int {
 // newAuthScheduler constructs an empty scheduler configured for the supplied selector strategy.
 func newAuthScheduler(selector Selector) *authScheduler {
 	return &authScheduler{
-		strategy:      selectorStrategy(selector),
-		providers:     make(map[string]*providerScheduler),
-		authProviders: make(map[string]string),
-		mixedCursors:  make(map[string]int),
+		strategy:       selectorStrategy(selector),
+		providers:      make(map[string]*providerScheduler),
+		authProviders:  make(map[string]string),
+		mixedCursors:   make(map[string]int),
+		stickyBindings: make(map[string]stickyAuthBinding),
+		stickyTTL:      time.Duration(internalconfig.DefaultRoutingStickyTTL) * time.Second,
 	}
 }
 
@@ -178,6 +189,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	switch selector.(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
+	case *StickyRoundRobinSelector:
+		return schedulerStrategyStickyRoundRobin
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
 	default:
@@ -190,10 +203,26 @@ func (s *authScheduler) setSelector(selector Selector) {
 	if s == nil {
 		return
 	}
+	nextStrategy := selectorStrategy(selector)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.strategy = selectorStrategy(selector)
-	clear(s.mixedCursors)
+	if s.strategy != nextStrategy {
+		clear(s.mixedCursors)
+		clear(s.stickyBindings)
+	}
+	s.strategy = nextStrategy
+}
+
+func (s *authScheduler) setStickyTTL(ttlSeconds int) {
+	if s == nil {
+		return
+	}
+	if ttlSeconds <= 0 {
+		ttlSeconds = internalconfig.DefaultRoutingStickyTTL
+	}
+	s.mu.Lock()
+	s.stickyTTL = time.Duration(ttlSeconds) * time.Second
+	s.mu.Unlock()
 }
 
 // rebuild recreates the complete scheduler state from an auth snapshot.
@@ -207,6 +236,7 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	s.authProviders = make(map[string]string)
 	s.mixedCursors = make(map[string]int)
 	now := time.Now()
+	s.clearExpiredStickyBindingsLocked(now)
 	for _, auth := range auths {
 		s.upsertAuthLocked(auth, now)
 	}
@@ -244,7 +274,9 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	modelKey := canonicalModelKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	stickyRouteKey := stickyRouteKeyFromMetadata(opts.Metadata)
 	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
+	now := time.Now()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -252,7 +284,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	if providerState == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	shard := providerState.ensureModelLocked(modelKey, time.Now())
+	shard := providerState.ensureModelLocked(modelKey, now)
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -270,7 +302,18 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+	bindingKey := s.stickyBindingKey(providerKey, modelKey, stickyRouteKey)
+	if s.strategy == schedulerStrategyStickyRoundRobin {
+		if picked := s.pickStickyBoundLocked(shard, preferWebsocket, pinnedAuthID, bindingKey, predicate); picked != nil {
+			return picked, nil
+		}
+	}
+	strategy := s.strategy
+	if strategy == schedulerStrategyStickyRoundRobin {
+		strategy = schedulerStrategyRoundRobin
+	}
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
+		s.maybeRememberStickyPickLocked(providerKey, modelKey, stickyRouteKey, picked.ID, now)
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -286,8 +329,6 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	if len(normalized) == 1 {
-		// When a single provider is eligible, reuse pickSingle so provider-specific preferences
-		// (for example Codex websocket transport) are applied consistently.
 		providerKey := normalized[0]
 		picked, errPick := s.pickSingle(ctx, providerKey, model, opts, tried)
 		if errPick != nil {
@@ -299,7 +340,9 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return picked, providerKey, nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	stickyRouteKey := stickyRouteKeyFromMetadata(opts.Metadata)
 	modelKey := canonicalModelKey(model)
+	now := time.Now()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -312,7 +355,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if providerState == nil {
 			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		shard := providerState.ensureModelLocked(modelKey, time.Now())
+		shard := providerState.ensureModelLocked(modelKey, now)
 		predicate := func(entry *scheduledAuth) bool {
 			if entry == nil || entry.auth == nil || entry.auth.ID != pinnedAuthID {
 				return false
@@ -333,7 +376,6 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	candidateShards := make([]*modelScheduler, len(normalized))
 	bestPriority := 0
 	hasCandidate := false
-	now := time.Now()
 	for providerIndex, providerKey := range normalized {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
@@ -355,6 +397,13 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	}
 	if !hasCandidate {
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+	}
+
+	if s.strategy == schedulerStrategyStickyRoundRobin {
+		bindingKey := s.stickyBindingProviderSetKey(normalized, modelKey, stickyRouteKey)
+		if picked, providerKey, ok := s.pickStickyBoundProviderLocked(candidateShards, normalized, bestPriority, bindingKey, predicate); ok {
+			return picked, providerKey, nil
+		}
 	}
 
 	if s.strategy == schedulerStrategyFillFirst {
@@ -422,6 +471,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			continue
 		}
 		s.mixedCursors[cursorKey] = slot + 1
+		s.maybeRememberMixedStickyPickLocked(normalized, modelKey, stickyRouteKey, picked.ID, now)
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
@@ -474,6 +524,225 @@ func triedPredicate(tried map[string]struct{}) func(*scheduledAuth) bool {
 		_, ok := tried[entry.auth.ID]
 		return !ok
 	}
+}
+
+func stickyRouteKeyFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[cliproxyexecutor.StickyRouteMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
+	}
+}
+
+func (s *authScheduler) stickyBindingKey(providerKey, modelKey, stickyRouteKey string) string {
+	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
+	modelKey = canonicalModelKey(modelKey)
+	stickyRouteKey = strings.TrimSpace(stickyRouteKey)
+	if providerKey == "" || stickyRouteKey == "" {
+		return ""
+	}
+	return providerKey + ":" + modelKey + ":" + stickyRouteKey
+}
+
+func (s *authScheduler) stickyBindingProviderSetKey(providers []string, modelKey, stickyRouteKey string) string {
+	stickyRouteKey = strings.TrimSpace(stickyRouteKey)
+	if len(providers) == 0 || stickyRouteKey == "" {
+		return ""
+	}
+	return strings.Join(providers, ",") + ":" + canonicalModelKey(modelKey) + ":" + stickyRouteKey
+}
+
+func (s *authScheduler) lookupStickyAuthIDLocked(bindingKey string, now time.Time) string {
+	if s == nil || bindingKey == "" || len(s.stickyBindings) == 0 {
+		return ""
+	}
+	binding, ok := s.stickyBindings[bindingKey]
+	if !ok {
+		return ""
+	}
+	if binding.authID == "" || (!binding.expiresAt.IsZero() && !binding.expiresAt.After(now)) {
+		delete(s.stickyBindings, bindingKey)
+		return ""
+	}
+	if _, ok := s.authProviders[binding.authID]; !ok {
+		delete(s.stickyBindings, bindingKey)
+		return ""
+	}
+	return binding.authID
+}
+
+func (s *authScheduler) rememberStickyAuthLocked(bindingKey, authID string, now time.Time) {
+	if s == nil || bindingKey == "" || authID == "" || s.stickyTTL <= 0 {
+		return
+	}
+	if s.stickyBindings == nil {
+		s.stickyBindings = make(map[string]stickyAuthBinding)
+	}
+	s.stickyBindings[bindingKey] = stickyAuthBinding{
+		authID:    authID,
+		expiresAt: now.Add(s.stickyTTL),
+	}
+}
+
+func (s *authScheduler) pickStickyBoundLocked(shard *modelScheduler, preferWebsocket bool, pinnedAuthID string, bindingKey string, basePredicate func(*scheduledAuth) bool) *Auth {
+	if s == nil || shard == nil || bindingKey == "" {
+		return nil
+	}
+	stickyAuthID := s.lookupStickyAuthIDLocked(bindingKey, time.Now())
+	if stickyAuthID == "" {
+		return nil
+	}
+	bestPriority, ok := shard.highestReadyPriorityLocked(preferWebsocket, basePredicate)
+	if !ok {
+		return nil
+	}
+	predicate := func(entry *scheduledAuth) bool {
+		if entry == nil || entry.auth == nil || entry.auth.ID != stickyAuthID {
+			return false
+		}
+		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
+			return false
+		}
+		if entry.meta == nil || entry.meta.priority != bestPriority {
+			return false
+		}
+		return basePredicate == nil || basePredicate(entry)
+	}
+	picked := shard.pickReadyAtPriorityLocked(preferWebsocket, bestPriority, schedulerStrategyFillFirst, predicate)
+	if picked == nil {
+		return nil
+	}
+	s.rememberStickyAuthLocked(bindingKey, picked.ID, time.Now())
+	return picked
+}
+
+func (s *authScheduler) pickStickyBoundProviderLocked(candidateShards []*modelScheduler, providers []string, bestPriority int, bindingKey string, basePredicate func(*scheduledAuth) bool) (*Auth, string, bool) {
+	if s == nil || bindingKey == "" {
+		return nil, "", false
+	}
+	stickyAuthID := s.lookupStickyAuthIDLocked(bindingKey, time.Now())
+	if stickyAuthID == "" {
+		return nil, "", false
+	}
+	providerKey := s.authProviders[stickyAuthID]
+	if providerKey == "" || !containsProvider(providers, providerKey) {
+		return nil, "", false
+	}
+	providerIndex := -1
+	for index, candidate := range providers {
+		if candidate == providerKey {
+			providerIndex = index
+			break
+		}
+	}
+	if providerIndex < 0 {
+		return nil, "", false
+	}
+	shard := candidateShards[providerIndex]
+	if shard == nil {
+		return nil, "", false
+	}
+	predicate := func(entry *scheduledAuth) bool {
+		if entry == nil || entry.auth == nil || entry.auth.ID != stickyAuthID {
+			return false
+		}
+		if entry.meta == nil || entry.meta.priority != bestPriority {
+			return false
+		}
+		return basePredicate == nil || basePredicate(entry)
+	}
+	picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyFillFirst, predicate)
+	if picked == nil {
+		return nil, "", false
+	}
+	s.rememberStickyAuthLocked(bindingKey, picked.ID, time.Now())
+	return picked, providerKey, true
+}
+
+func (s *authScheduler) clearExpiredStickyBindingsLocked(now time.Time) {
+	if s == nil || len(s.stickyBindings) == 0 {
+		return
+	}
+	for key, binding := range s.stickyBindings {
+		if binding.authID == "" || (!binding.expiresAt.IsZero() && !binding.expiresAt.After(now)) {
+			delete(s.stickyBindings, key)
+		}
+	}
+}
+
+func (s *authScheduler) clearStickyBindingsForAuthLocked(authID string) {
+	if s == nil || authID == "" || len(s.stickyBindings) == 0 {
+		return
+	}
+	for key, binding := range s.stickyBindings {
+		if binding.authID == authID {
+			delete(s.stickyBindings, key)
+		}
+	}
+}
+
+func (s *authScheduler) maybeRememberStickyPickLocked(providerKey, modelKey, stickyRouteKey, authID string, now time.Time) {
+	if s == nil || s.strategy != schedulerStrategyStickyRoundRobin {
+		return
+	}
+	bindingKey := s.stickyBindingKey(providerKey, modelKey, stickyRouteKey)
+	s.rememberStickyAuthLocked(bindingKey, authID, now)
+}
+
+func (s *authScheduler) maybeRememberMixedStickyPickLocked(providers []string, modelKey, stickyRouteKey, authID string, now time.Time) {
+	if s == nil || s.strategy != schedulerStrategyStickyRoundRobin {
+		return
+	}
+	bindingKey := s.stickyBindingProviderSetKey(providers, modelKey, stickyRouteKey)
+	s.rememberStickyAuthLocked(bindingKey, authID, now)
+}
+
+func (s *authScheduler) stickyTTLSecondsLocked() int {
+	if s == nil || s.stickyTTL <= 0 {
+		return internalconfig.DefaultRoutingStickyTTL
+	}
+	return int(s.stickyTTL / time.Second)
+}
+
+func (s *authScheduler) forceStickyTTLForTest(ttl time.Duration) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stickyTTL = ttl
+}
+
+func (s *authScheduler) setStickyBindingForTest(bindingKey, authID string, expiresAt time.Time) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stickyBindings == nil {
+		s.stickyBindings = make(map[string]stickyAuthBinding)
+	}
+	s.stickyBindings[bindingKey] = stickyAuthBinding{authID: authID, expiresAt: expiresAt}
+}
+
+func (s *authScheduler) stickyBindingForTest(bindingKey string) (stickyAuthBinding, bool) {
+	if s == nil {
+		return stickyAuthBinding{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	binding, ok := s.stickyBindings[bindingKey]
+	return binding, ok
 }
 
 // normalizeProviderKeys lowercases, trims, and de-duplicates provider keys while preserving order.
@@ -530,6 +799,7 @@ func (s *authScheduler) removeAuthLocked(authID string) {
 	if authID == "" {
 		return
 	}
+	s.clearStickyBindingsForAuthLocked(authID)
 	if providerKey := s.authProviders[authID]; providerKey != "" {
 		if providerState := s.providers[providerKey]; providerState != nil {
 			providerState.removeAuthLocked(authID)

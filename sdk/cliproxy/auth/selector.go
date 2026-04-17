@@ -29,6 +29,11 @@ type RoundRobinSelector struct {
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+// StickyRoundRobinSelector enables scheduler-managed sticky affinity with round-robin fallback.
+// The concrete sticky binding behavior is implemented by the built-in auth scheduler.
+// The embedded round-robin selector keeps this type compatible with the Selector interface.
+type StickyRoundRobinSelector struct{ RoundRobinSelector }
+
 type blockReason int
 
 const (

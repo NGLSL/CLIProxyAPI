@@ -2,6 +2,8 @@ package access
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,7 +19,44 @@ type Provider interface {
 type Result struct {
 	Provider  string
 	Principal string
+	Index     string
 	Metadata  map[string]string
+}
+
+func stableAccessIndex(seed string) string {
+	seed = strings.TrimSpace(seed)
+	if seed == "" {
+		return ""
+	}
+	checksum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(checksum[:8])
+}
+
+// EnsureIndex returns a stable access identity index.
+func (r *Result) EnsureIndex() string {
+	if r == nil {
+		return ""
+	}
+	if strings.TrimSpace(r.Index) != "" {
+		return strings.TrimSpace(r.Index)
+	}
+	provider := strings.TrimSpace(r.Provider)
+	principal := strings.TrimSpace(r.Principal)
+	if provider == "" || principal == "" {
+		return ""
+	}
+	r.Index = stableAccessIndex(provider + "\x00" + principal)
+	return r.Index
+}
+
+// StableIndex returns the stable access index for provider and principal.
+func StableIndex(provider, principal string) string {
+	provider = strings.TrimSpace(provider)
+	principal = strings.TrimSpace(principal)
+	if provider == "" || principal == "" {
+		return ""
+	}
+	return stableAccessIndex(provider + "\x00" + principal)
 }
 
 var (

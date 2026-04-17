@@ -192,7 +192,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *FillFirstSelector:
+	case *RoundRobinSelector, *FillFirstSelector, *StickyRoundRobinSelector:
 		return true
 	default:
 		return false
@@ -361,6 +361,9 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 	m.runtimeConfig.Store(cfg)
+	if m.scheduler != nil {
+		m.scheduler.setStickyTTL(cfg.Routing.StickyTTL)
+	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 

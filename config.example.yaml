@@ -102,7 +102,8 @@ quota-exceeded:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), fill-first
+  strategy: "round-robin" # round-robin (default), fill-first, sticky-round-robin
+  sticky-ttl: 1800 # Sticky binding TTL in seconds for sticky-round-robin
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false

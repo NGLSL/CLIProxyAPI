@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -525,5 +526,165 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 	}
 	if len(seen) != 2 {
 		t.Fatalf("len(seen) = %d, want %d", len(seen), 2)
+	}
+}
+
+func TestSchedulerPick_StickyRoundRobinBindsPerRouteKey(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&StickyRoundRobinSelector{},
+		&Auth{ID: "b", Provider: "gemini"},
+		&Auth{ID: "a", Provider: "gemini"},
+	)
+
+	routeA := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.StickyRouteMetadataKey: "route-a"}}
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", routeA, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle(route-a first) error = %v", errPick)
+	}
+	if got == nil || got.ID != "a" {
+		t.Fatalf("pickSingle(route-a first) auth = %v, want auth a", got)
+	}
+
+	bindingKey := scheduler.stickyBindingKey("gemini", "", "route-a")
+	binding, ok := scheduler.stickyBindingForTest(bindingKey)
+	if !ok {
+		t.Fatalf("stickyBindingForTest(route-a) ok = false")
+	}
+	if binding.authID != "a" {
+		t.Fatalf("stickyBindingForTest(route-a).authID = %q, want %q", binding.authID, "a")
+	}
+
+	got, errPick = scheduler.pickSingle(context.Background(), "gemini", "", routeA, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle(route-a second) error = %v", errPick)
+	}
+	if got == nil || got.ID != "a" {
+		t.Fatalf("pickSingle(route-a second) auth = %v, want auth a", got)
+	}
+
+	routeB := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.StickyRouteMetadataKey: "route-b"}}
+	got, errPick = scheduler.pickSingle(context.Background(), "gemini", "", routeB, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle(route-b first) error = %v", errPick)
+	}
+	if got == nil || got.ID != "b" {
+		t.Fatalf("pickSingle(route-b first) auth = %v, want auth b", got)
+	}
+}
+
+func TestSchedulerPick_StickyRoundRobinFallsBackWhenBoundAuthUnavailable(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&StickyRoundRobinSelector{},
+		&Auth{
+			ID:             "a",
+			Provider:       "gemini",
+			Unavailable:    true,
+			NextRetryAfter: time.Now().Add(time.Minute),
+			Quota: QuotaState{
+				Exceeded: true,
+			},
+		},
+		&Auth{ID: "b", Provider: "gemini"},
+	)
+
+	bindingKey := scheduler.stickyBindingKey("gemini", "", "route-a")
+	scheduler.setStickyBindingForTest(bindingKey, "a", time.Now().Add(time.Minute))
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.StickyRouteMetadataKey: "route-a"}}
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "b" {
+		t.Fatalf("pickSingle() auth = %v, want auth b", got)
+	}
+
+	binding, ok := scheduler.stickyBindingForTest(bindingKey)
+	if !ok {
+		t.Fatalf("stickyBindingForTest() ok = false")
+	}
+	if binding.authID != "b" {
+		t.Fatalf("stickyBindingForTest().authID = %q, want %q", binding.authID, "b")
+	}
+}
+
+func TestSchedulerPick_MixedProvidersStickyRoundRobinBindsProviderAndAuth(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&StickyRoundRobinSelector{},
+		&Auth{ID: "gemini-a", Provider: "gemini"},
+		&Auth{ID: "claude-a", Provider: "claude"},
+	)
+
+	providers := []string{"gemini", "claude"}
+	routeA := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.StickyRouteMetadataKey: "route-a"}}
+	got, provider, errPick := scheduler.pickMixed(context.Background(), providers, "", routeA, nil)
+	if errPick != nil {
+		t.Fatalf("pickMixed(route-a first) error = %v", errPick)
+	}
+	if got == nil || provider != "gemini" || got.ID != "gemini-a" {
+		t.Fatalf("pickMixed(route-a first) got auth=%v provider=%q, want gemini-a/gemini", got, provider)
+	}
+
+	bindingKey := scheduler.stickyBindingProviderSetKey(providers, "", "route-a")
+	binding, ok := scheduler.stickyBindingForTest(bindingKey)
+	if !ok {
+		t.Fatalf("stickyBindingForTest(route-a) ok = false")
+	}
+	if binding.authID != "gemini-a" {
+		t.Fatalf("stickyBindingForTest(route-a).authID = %q, want %q", binding.authID, "gemini-a")
+	}
+
+	got, provider, errPick = scheduler.pickMixed(context.Background(), providers, "", routeA, nil)
+	if errPick != nil {
+		t.Fatalf("pickMixed(route-a second) error = %v", errPick)
+	}
+	if got == nil || provider != "gemini" || got.ID != "gemini-a" {
+		t.Fatalf("pickMixed(route-a second) got auth=%v provider=%q, want gemini-a/gemini", got, provider)
+	}
+
+	routeB := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.StickyRouteMetadataKey: "route-b"}}
+	got, provider, errPick = scheduler.pickMixed(context.Background(), providers, "", routeB, nil)
+	if errPick != nil {
+		t.Fatalf("pickMixed(route-b first) error = %v", errPick)
+	}
+	if got == nil || provider != "claude" || got.ID != "claude-a" {
+		t.Fatalf("pickMixed(route-b first) got auth=%v provider=%q, want claude-a/claude", got, provider)
+	}
+}
+
+func TestManager_InitializesSchedulerForStickyRoundRobinSelector(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	if manager.scheduler == nil {
+		t.Fatalf("manager.scheduler = nil")
+	}
+	if manager.scheduler.strategy != schedulerStrategyStickyRoundRobin {
+		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyStickyRoundRobin)
+	}
+}
+
+func TestManager_SetConfig_UpdatesSchedulerStickyTTL(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	if got := manager.scheduler.stickyTTLSecondsLocked(); got != internalconfig.DefaultRoutingStickyTTL {
+		t.Fatalf("stickyTTLSecondsLocked() = %d, want %d", got, internalconfig.DefaultRoutingStickyTTL)
+	}
+
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{StickyTTL: 42}})
+	if got := manager.scheduler.stickyTTLSecondsLocked(); got != 42 {
+		t.Fatalf("stickyTTLSecondsLocked() after SetConfig = %d, want %d", got, 42)
+	}
+
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{StickyTTL: 0}})
+	if got := manager.scheduler.stickyTTLSecondsLocked(); got != internalconfig.DefaultRoutingStickyTTL {
+		t.Fatalf("stickyTTLSecondsLocked() after defaulting = %d, want %d", got, internalconfig.DefaultRoutingStickyTTL)
 	}
 }
