@@ -26,15 +26,13 @@ func init() {
 
 // LoggerPlugin collects in-memory request statistics for usage analysis.
 // It implements coreusage.Plugin to receive usage records emitted by the runtime.
-type LoggerPlugin struct {
-	stats *RequestStatistics
-}
+type LoggerPlugin struct{}
 
 // NewLoggerPlugin constructs a new logger plugin instance.
 //
 // Returns:
 //   - *LoggerPlugin: A new logger plugin instance wired to the shared statistics store.
-func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{stats: defaultRequestStatistics} }
+func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{} }
 
 // HandleUsage implements coreusage.Plugin.
 // It updates the in-memory statistics store whenever a usage record is received.
@@ -46,10 +44,14 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	if !statisticsEnabled.Load() {
 		return
 	}
-	if p == nil || p.stats == nil {
+	if p == nil {
 		return
 	}
-	p.stats.Record(ctx, record)
+	stats := GetRequestStatistics()
+	if stats == nil {
+		return
+	}
+	stats.Record(ctx, record)
 }
 
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.
@@ -153,6 +155,28 @@ func NewRequestStatistics() *RequestStatistics {
 		tokensByHour:   make(map[int]int64),
 	}
 }
+
+// Reset clears all in-memory statistics while keeping the store instance reusable.
+func (s *RequestStatistics) Reset() {
+	if s == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.totalRequests = 0
+	s.successCount = 0
+	s.failureCount = 0
+	s.totalTokens = 0
+	s.apis = make(map[string]*apiStats)
+	s.requestsByDay = make(map[string]int64)
+	s.requestsByHour = make(map[int]int64)
+	s.tokensByDay = make(map[string]int64)
+	s.tokensByHour = make(map[int]int64)
+}
+
+func ResetDefaultRequestStatistics() { defaultRequestStatistics.Reset() }
 
 // Record ingests a new usage record and updates the aggregates.
 func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record) {

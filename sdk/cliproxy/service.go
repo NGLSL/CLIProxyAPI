@@ -15,13 +15,13 @@ import (
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/api"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/watcher"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/NGLSL/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/NGLSL/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	coreusage "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
@@ -89,15 +89,20 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	usagePersistenceCancel context.CancelFunc
+	usagePersistenceDone   chan struct{}
 }
+
+const usagePersistenceInterval = time.Minute
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
 //
 // Parameters:
 //   - plugin: The usage plugin to register
-func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
-	usage.RegisterPlugin(plugin)
+func (s *Service) RegisterUsagePlugin(plugin coreusage.Plugin) {
+	coreusage.RegisterPlugin(plugin)
 }
 
 // newDefaultAuthManager creates a default authentication manager with all supported providers.
@@ -197,6 +202,119 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 		s.applyCoreAuthRemoval(ctx, id)
 	default:
 		log.Debugf("received unknown auth update action: %v", update.Action)
+	}
+}
+
+func (s *Service) usageSnapshotPath() string {
+	if s == nil {
+		return ""
+	}
+	return internalusage.DefaultSnapshotPath(s.configPath)
+}
+
+func (s *Service) configureUsageStatisticsEnabled() bool {
+	enabled := s != nil && s.cfg != nil && s.cfg.UsageStatisticsEnabled
+	internalusage.SetStatisticsEnabled(enabled)
+	return enabled
+}
+
+func (s *Service) restoreUsageSnapshot() {
+	if s == nil || !internalusage.StatisticsEnabled() {
+		return
+	}
+
+	path := s.usageSnapshotPath()
+	if path == "" {
+		return
+	}
+
+	snapshot, err := internalusage.LoadSnapshotFromFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		log.Warnf("failed to restore usage snapshot from %s: %v", path, err)
+		return
+	}
+
+	result := internalusage.GetRequestStatistics().MergeSnapshot(snapshot)
+	if result.Added > 0 || result.Skipped > 0 {
+		log.Infof("restored usage snapshot from %s (added=%d skipped=%d)", path, result.Added, result.Skipped)
+	}
+}
+
+func (s *Service) persistUsageSnapshot() error {
+	if s == nil || !internalusage.StatisticsEnabled() {
+		return nil
+	}
+
+	path := s.usageSnapshotPath()
+	if path == "" {
+		return nil
+	}
+
+	if err := internalusage.SaveRequestStatisticsToFile(path, internalusage.GetRequestStatistics()); err != nil {
+		return fmt.Errorf("persist usage snapshot to %s: %w", path, err)
+	}
+	return nil
+}
+
+func (s *Service) startUsagePersistence(ctx context.Context) {
+	if s == nil || !internalusage.StatisticsEnabled() {
+		return
+	}
+	if s.usageSnapshotPath() == "" || s.usagePersistenceCancel != nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	s.usagePersistenceCancel = cancel
+	s.usagePersistenceDone = done
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(usagePersistenceInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				if err := s.persistUsageSnapshot(); err != nil {
+					log.Warnf("failed to persist usage snapshot: %v", err)
+				}
+			}
+		}
+	}()
+}
+
+func (s *Service) stopUsagePersistence() {
+	if s == nil {
+		return
+	}
+	if s.usagePersistenceCancel != nil {
+		s.usagePersistenceCancel()
+		s.usagePersistenceCancel = nil
+	}
+	if s.usagePersistenceDone != nil {
+		<-s.usagePersistenceDone
+		s.usagePersistenceDone = nil
+	}
+}
+
+func (s *Service) flushUsageAndPersist() {
+	if s == nil {
+		return
+	}
+	manager := coreusage.DefaultManager()
+	if manager != nil {
+		manager.Stop()
+	}
+	if err := s.persistUsageSnapshot(); err != nil {
+		log.Warnf("failed to persist usage snapshot during shutdown: %v", err)
 	}
 }
 
@@ -481,7 +599,13 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	usage.StartDefault(ctx)
+	enabled := s.configureUsageStatisticsEnabled()
+	coreusage.StartDefault(ctx)
+	internalusage.ResetDefaultRequestStatistics()
+	if enabled {
+		s.restoreUsageSnapshot()
+		s.startUsagePersistence(ctx)
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -653,6 +777,7 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetSelector(selector)
 		}
 
+		wasUsageEnabled := internalusage.StatisticsEnabled()
 		s.applyRetryConfig(newCfg)
 		s.applyPprofConfig(newCfg)
 		if s.server != nil {
@@ -661,6 +786,14 @@ func (s *Service) Run(ctx context.Context) error {
 		s.cfgMu.Lock()
 		s.cfg = newCfg
 		s.cfgMu.Unlock()
+		if s.configureUsageStatisticsEnabled() {
+			if !wasUsageEnabled {
+				s.restoreUsageSnapshot()
+			}
+			s.startUsagePersistence(context.Background())
+		} else {
+			s.stopUsagePersistence()
+		}
 		if s.coreManager != nil {
 			s.coreManager.SetConfig(newCfg)
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
@@ -768,7 +901,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
-		usage.StopDefault()
+		s.stopUsagePersistence()
+		s.flushUsageAndPersist()
 	})
 	return shutdownErr
 }

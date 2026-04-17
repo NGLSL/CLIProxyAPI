@@ -44,14 +44,14 @@ type queueItem struct {
 
 // Manager maintains a queue of usage records and delivers them to registered plugins.
 type Manager struct {
-	once     sync.Once
-	stopOnce sync.Once
 	cancel   context.CancelFunc
+	workerWG sync.WaitGroup
 
-	mu     sync.Mutex
-	cond   *sync.Cond
-	queue  []queueItem
-	closed bool
+	mu      sync.Mutex
+	cond    *sync.Cond
+	queue   []queueItem
+	closed  bool
+	running bool
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
@@ -69,14 +69,24 @@ func (m *Manager) Start(ctx context.Context) {
 	if m == nil {
 		return
 	}
-	m.once.Do(func() {
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		var workerCtx context.Context
-		workerCtx, m.cancel = context.WithCancel(ctx)
-		go m.run(workerCtx)
-	})
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.running {
+		return
+	}
+	m.closed = false
+	m.running = true
+	var workerCtx context.Context
+	workerCtx, m.cancel = context.WithCancel(ctx)
+	m.workerWG.Add(1)
+	go func() {
+		defer m.workerWG.Done()
+		m.run(workerCtx)
+	}()
 }
 
 // Stop stops the dispatcher and drains the queue.
@@ -84,15 +94,70 @@ func (m *Manager) Stop() {
 	if m == nil {
 		return
 	}
-	m.stopOnce.Do(func() {
-		if m.cancel != nil {
-			m.cancel()
-		}
-		m.mu.Lock()
-		m.closed = true
+
+	m.mu.Lock()
+	if !m.running {
 		m.mu.Unlock()
-		m.cond.Broadcast()
-	})
+		return
+	}
+	cancel := m.cancel
+	m.closed = true
+	m.running = false
+	m.cancel = nil
+	m.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	m.cond.Broadcast()
+	m.workerWG.Wait()
+}
+
+// Reset stops the dispatcher and clears pending state so the manager can be reused.
+func (m *Manager) Reset() {
+	if m == nil {
+		return
+	}
+	m.Stop()
+	m.mu.Lock()
+	m.queue = nil
+	m.closed = false
+	m.running = false
+	m.cancel = nil
+	m.mu.Unlock()
+}
+
+// SetDefaultManager replaces the global usage manager instance.
+func SetDefaultManager(manager *Manager) {
+	if manager == nil {
+		manager = NewManager(512)
+	}
+	defaultManager = manager
+}
+
+// ResetDefaultManager resets the global usage manager to a fresh reusable instance.
+func ResetDefaultManager() { SetDefaultManager(NewManager(512)) }
+
+// ResetDefaultManagerForTest swaps the global usage manager for tests and restores it afterwards.
+func ResetDefaultManagerForTest(tb interface{ Cleanup(func()) }) *Manager {
+	previous := DefaultManager()
+	manager := NewManager(512)
+	SetDefaultManager(manager)
+	if tb != nil {
+		tb.Cleanup(func() {
+			manager.Stop()
+			SetDefaultManager(previous)
+		})
+	}
+	return manager
+}
+
+// Wait blocks until the dispatcher has drained the queue and exited.
+func (m *Manager) Wait() {
+	if m == nil {
+		return
+	}
+	m.workerWG.Wait()
 }
 
 // Register appends a plugin to the delivery list.
