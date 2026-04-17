@@ -17,6 +17,8 @@ import (
 
 var statisticsEnabled atomic.Bool
 
+const maxRequestDetailsPerModel = 200
+
 func init() {
 	statisticsEnabled.Store(true)
 	coreusage.RegisterPlugin(NewLoggerPlugin())
@@ -225,6 +227,9 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	if len(modelStatsValue.Details) > maxRequestDetailsPerModel {
+		modelStatsValue.Details = modelStatsValue.Details[len(modelStatsValue.Details)-maxRequestDetailsPerModel:]
+	}
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
