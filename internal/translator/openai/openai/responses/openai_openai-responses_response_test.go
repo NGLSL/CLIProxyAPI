@@ -504,3 +504,177 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallDoneA
 		t.Fatalf("unexpected completed function_call order: %v", completedOrder)
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_PreservesResponsesRequestFields(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"ignored-model",
+		"instructions":"system prompt",
+		"max_output_tokens":128,
+		"parallel_tool_calls":true,
+		"metadata":{"nested":{"value":1}},
+		"service_tier":"priority",
+		"store":true,
+		"temperature":0.7,
+		"top_p":0.8,
+		"top_logprobs":3,
+		"prompt_cache_key":"cache-key",
+		"prompt_cache_retention":"short",
+		"text":{"format":{"type":"json_schema","json_schema":{"name":"demo","schema":{"type":"object"}}}},
+		"reasoning":{"effort":"high","summary":"auto"},
+		"tool_choice":{"type":"function","function":{"name":"lookup"}},
+		"tools":[{"type":"function","name":"lookup","description":"Find records","parameters":{"type":"object"}}]
+	}`)
+	request := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-4.1", originalRequest, false)
+	response := []byte(`{
+		"id":"chatcmpl-123",
+		"object":"chat.completion",
+		"created":1773896263,
+		"model":"gpt-4.1",
+		"choices":[{
+			"index":0,
+			"message":{"role":"assistant","content":"hello"},
+			"finish_reason":"stop"
+		}],
+		"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
+	}`)
+
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-4.1", originalRequest, request, response, nil)
+
+	if got := gjson.GetBytes(out, "instructions").String(); got != "system prompt" {
+		t.Fatalf("instructions = %q, want %q", got, "system prompt")
+	}
+	if got := gjson.GetBytes(out, "max_output_tokens").Int(); got != 128 {
+		t.Fatalf("max_output_tokens = %d, want %d", got, 128)
+	}
+	if got := gjson.GetBytes(out, "parallel_tool_calls").Bool(); !got {
+		t.Fatal("parallel_tool_calls = false, want true")
+	}
+	if got := gjson.GetBytes(out, "metadata.nested.value").Int(); got != 1 {
+		t.Fatalf("metadata.nested.value = %d, want %d", got, 1)
+	}
+	if got := gjson.GetBytes(out, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want %q", got, "priority")
+	}
+	if got := gjson.GetBytes(out, "store").Bool(); !got {
+		t.Fatal("store = false, want true")
+	}
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 0.7 {
+		t.Fatalf("temperature = %v, want %v", got, 0.7)
+	}
+	if got := gjson.GetBytes(out, "top_p").Float(); got != 0.8 {
+		t.Fatalf("top_p = %v, want %v", got, 0.8)
+	}
+	if got := gjson.GetBytes(out, "top_logprobs").Int(); got != 3 {
+		t.Fatalf("top_logprobs = %d, want %d", got, 3)
+	}
+	if got := gjson.GetBytes(out, "prompt_cache_key").String(); got != "cache-key" {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, "cache-key")
+	}
+	if got := gjson.GetBytes(out, "prompt_cache_retention").String(); got != "short" {
+		t.Fatalf("prompt_cache_retention = %q, want %q", got, "short")
+	}
+	if got := gjson.GetBytes(out, "text.format.type").String(); got != "json_schema" {
+		t.Fatalf("text.format.type = %q, want %q", got, "json_schema")
+	}
+	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("reasoning.effort = %q, want %q", got, "high")
+	}
+	if got := gjson.GetBytes(out, "reasoning.summary").String(); got != "auto" {
+		t.Fatalf("reasoning.summary = %q, want %q", got, "auto")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "lookup" {
+		t.Fatalf("tool_choice.function.name = %q, want %q", got, "lookup")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "lookup" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "lookup")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompletedPreservesTranslatedResponsesRequestFields(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"ignored-model",
+		"instructions":"system prompt",
+		"max_output_tokens":128,
+		"parallel_tool_calls":true,
+		"metadata":{"nested":{"value":1}},
+		"service_tier":"priority",
+		"store":true,
+		"temperature":0.7,
+		"top_p":0.8,
+		"top_logprobs":3,
+		"prompt_cache_key":"cache-key",
+		"prompt_cache_retention":"short",
+		"text":{"format":{"type":"json_schema","json_schema":{"name":"demo","schema":{"type":"object"}}}},
+		"reasoning":{"effort":"high","summary":"auto"},
+		"tool_choice":{"type":"function","function":{"name":"lookup"}},
+		"tools":[{"type":"function","name":"lookup","description":"Find records","parameters":{"type":"object"}}]
+	}`)
+	request := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-4.1", originalRequest, true)
+	in := []string{
+		`data: {"id":"resp_fields","object":"chat.completion.chunk","created":1773896263,"model":"gpt-4.1","choices":[{"index":0,"delta":{"role":"assistant","content":"hello","reasoning_content":null,"tool_calls":null},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var completed gjson.Result
+	for _, line := range in {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "gpt-4.1", originalRequest, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.completed" {
+				completed = data.Get("response")
+			}
+		}
+	}
+
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+	if got := completed.Get("instructions").String(); got != "system prompt" {
+		t.Fatalf("instructions = %q, want %q", got, "system prompt")
+	}
+	if got := completed.Get("max_output_tokens").Int(); got != 128 {
+		t.Fatalf("max_output_tokens = %d, want %d", got, 128)
+	}
+	if got := completed.Get("parallel_tool_calls").Bool(); !got {
+		t.Fatal("parallel_tool_calls = false, want true")
+	}
+	if got := completed.Get("metadata.nested.value").Int(); got != 1 {
+		t.Fatalf("metadata.nested.value = %d, want %d", got, 1)
+	}
+	if got := completed.Get("service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want %q", got, "priority")
+	}
+	if got := completed.Get("store").Bool(); !got {
+		t.Fatal("store = false, want true")
+	}
+	if got := completed.Get("temperature").Float(); got != 0.7 {
+		t.Fatalf("temperature = %v, want %v", got, 0.7)
+	}
+	if got := completed.Get("top_p").Float(); got != 0.8 {
+		t.Fatalf("top_p = %v, want %v", got, 0.8)
+	}
+	if got := completed.Get("top_logprobs").Int(); got != 3 {
+		t.Fatalf("top_logprobs = %d, want %d", got, 3)
+	}
+	if got := completed.Get("prompt_cache_key").String(); got != "cache-key" {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, "cache-key")
+	}
+	if got := completed.Get("prompt_cache_retention").String(); got != "short" {
+		t.Fatalf("prompt_cache_retention = %q, want %q", got, "short")
+	}
+	if got := completed.Get("text.format.type").String(); got != "json_schema" {
+		t.Fatalf("text.format.type = %q, want %q", got, "json_schema")
+	}
+	if got := completed.Get("reasoning.effort").String(); got != "high" {
+		t.Fatalf("reasoning.effort = %q, want %q", got, "high")
+	}
+	if got := completed.Get("reasoning.summary").String(); got != "auto" {
+		t.Fatalf("reasoning.summary = %q, want %q", got, "auto")
+	}
+	if got := completed.Get("tool_choice.function.name").String(); got != "lookup" {
+		t.Fatalf("tool_choice.function.name = %q, want %q", got, "lookup")
+	}
+	if got := completed.Get("tools.0.name").String(); got != "lookup" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "lookup")
+	}
+}
