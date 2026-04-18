@@ -133,6 +133,8 @@ var anthropicHosts = map[string]struct{}{
 	"api.anthropic.com": {},
 }
 
+var sharedUtlsFallbackRoundTrippers = newRoundTripperCache()
+
 // fallbackRoundTripper uses utls for Anthropic HTTPS hosts and falls back to
 // standard transport for all other requests (non-HTTPS or non-Anthropic hosts).
 type fallbackRoundTripper struct {
@@ -149,37 +151,51 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	return f.fallback.RoundTrip(req)
 }
 
-// NewUtlsHTTPClient creates an HTTP client using utls Chrome TLS fingerprint.
-// Use this for Claude API requests to match real Claude Code's TLS behavior.
-// Falls back to standard transport for non-HTTPS requests.
-func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
+func utlsFallbackCacheKey(proxyURL string) string {
+	if cacheKey := normalizedProxyCacheKey(proxyURL); cacheKey != "" {
+		return cacheKey
 	}
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
+	return "inherit"
+}
 
-	utlsRT := newUtlsRoundTripper(proxyURL)
-
-	var standardTransport http.RoundTripper = &http.Transport{
+func newDefaultUtlsFallbackTransport() http.RoundTripper {
+	return &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
+}
+
+func newCachedFallbackRoundTripper(proxyURL string) *fallbackRoundTripper {
+	f := &fallbackRoundTripper{
+		utls:     newUtlsRoundTripper(proxyURL),
+		fallback: newDefaultUtlsFallbackTransport(),
+	}
 	if proxyURL != "" {
-		if transport := buildProxyTransport(proxyURL); transport != nil {
-			standardTransport = transport
+		if transport := getCachedProxyTransport(proxyURL); transport != nil {
+			f.fallback = transport
 		}
 	}
+	return f
+}
 
+func getCachedUtlsFallbackRoundTripper(proxyURL string) http.RoundTripper {
+	cacheKey := utlsFallbackCacheKey(proxyURL)
+	if transport := sharedUtlsFallbackRoundTrippers.Load(cacheKey); transport != nil {
+		return transport
+	}
+	transport := newCachedFallbackRoundTripper(proxyURL)
+	return sharedUtlsFallbackRoundTrippers.LoadOrStore(cacheKey, transport)
+}
+
+// NewUtlsHTTPClient creates an HTTP client using utls Chrome TLS fingerprint.
+// Use this for Claude API requests to match real Claude Code's TLS behavior.
+// Falls back to standard transport for non-HTTPS requests.
+func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	proxyURL := effectiveProxyURL(cfg, auth)
 	client := &http.Client{
-		Transport: &fallbackRoundTripper{
-			utls:     utlsRT,
-			fallback: standardTransport,
-		},
+		Transport: getCachedUtlsFallbackRoundTripper(proxyURL),
 	}
 	if timeout > 0 {
 		client.Timeout = timeout
