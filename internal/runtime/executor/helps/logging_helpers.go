@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	apiAttemptsKey                 = "API_UPSTREAM_ATTEMPTS"
-	apiRequestKey                  = "API_REQUEST"
-	apiResponseKey                 = "API_RESPONSE"
-	apiWebsocketTimelineKey        = "API_WEBSOCKET_TIMELINE"
-	apiAttemptResponseTimestampKey = "API_ATTEMPT_RESPONSE_TIMESTAMP"
+	apiAttemptsKey                    = "API_UPSTREAM_ATTEMPTS"
+	apiRequestKey                     = "API_REQUEST"
+	apiResponseKey                    = "API_RESPONSE"
+	apiWebsocketTimelineKey           = "API_WEBSOCKET_TIMELINE"
+	apiAttemptResponseTimestampKey    = "API_ATTEMPT_RESPONSE_TIMESTAMP"
+	apiAggregatedResponseStateContext = "API_AGGREGATED_RESPONSE_STATE"
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
@@ -51,6 +52,127 @@ type upstreamAttempt struct {
 	bodyHasContent       bool
 	prevWasSSEEvent      bool
 	errorWritten         bool
+}
+
+type aggregatedAPIResponse struct {
+	buffer                   bytes.Buffer
+	lastAttemptIndex         int
+	syntheticTrailingNewline bool
+}
+
+func (a *aggregatedAPIResponse) appendAttemptDelta(attemptIndex int, delta string, underlyingEndsWithNewline bool) {
+	if a == nil || delta == "" {
+		return
+	}
+	if a.buffer.Len() > 0 {
+		if attemptIndex != a.lastAttemptIndex {
+			a.ensureTrailingNewline()
+			a.buffer.WriteByte('\n')
+		} else if a.syntheticTrailingNewline {
+			a.trimTrailingNewline()
+		}
+	}
+	_, _ = a.buffer.WriteString(delta)
+	a.syntheticTrailingNewline = false
+	if !underlyingEndsWithNewline {
+		a.ensureSyntheticTrailingNewline()
+	}
+	a.lastAttemptIndex = attemptIndex
+}
+
+func (a *aggregatedAPIResponse) ensureTrailingNewline() {
+	if a == nil || a.buffer.Len() == 0 {
+		return
+	}
+	data := a.buffer.Bytes()
+	if data[len(data)-1] == '\n' {
+		return
+	}
+	a.buffer.WriteByte('\n')
+}
+
+func (a *aggregatedAPIResponse) ensureSyntheticTrailingNewline() {
+	if a == nil || a.buffer.Len() == 0 {
+		return
+	}
+	data := a.buffer.Bytes()
+	if data[len(data)-1] != '\n' {
+		a.buffer.WriteByte('\n')
+		a.syntheticTrailingNewline = true
+	}
+}
+
+func (a *aggregatedAPIResponse) trimTrailingNewline() {
+	if a == nil || a.buffer.Len() == 0 {
+		return
+	}
+	data := a.buffer.Bytes()
+	if data[len(data)-1] != '\n' {
+		return
+	}
+	a.buffer.Truncate(len(data) - 1)
+	a.syntheticTrailingNewline = false
+}
+
+func (a *aggregatedAPIResponse) snapshot() []byte {
+	if a == nil || a.buffer.Len() == 0 {
+		return nil
+	}
+	return bytes.Clone(a.buffer.Bytes())
+}
+
+func (a *aggregatedAPIResponse) rebuild(attempts []*upstreamAttempt) {
+	if a == nil {
+		return
+	}
+	a.buffer.Reset()
+	a.lastAttemptIndex = 0
+	a.syntheticTrailingNewline = false
+	for _, attempt := range attempts {
+		if attempt == nil || attempt.response == nil {
+			continue
+		}
+		responseText := attempt.response.String()
+		if responseText == "" {
+			continue
+		}
+		a.appendAttemptDelta(attempt.index, responseText, strings.HasSuffix(responseText, "\n"))
+	}
+}
+
+func (a *aggregatedAPIResponse) syncContext(ginCtx *gin.Context) {
+	if ginCtx == nil {
+		return
+	}
+	data := a.snapshot()
+	if len(data) == 0 {
+		ginCtx.Set(apiResponseKey, []byte(nil))
+		return
+	}
+	ginCtx.Set(apiResponseKey, data)
+}
+
+func getAggregatedAPIResponse(ginCtx *gin.Context) *aggregatedAPIResponse {
+	if ginCtx == nil {
+		return nil
+	}
+	if value, exists := ginCtx.Get(apiAggregatedResponseStateContext); exists {
+		if state, ok := value.(*aggregatedAPIResponse); ok && state != nil {
+			return state
+		}
+	}
+	state := &aggregatedAPIResponse{}
+	ginCtx.Set(apiAggregatedResponseStateContext, state)
+	return state
+}
+
+func appendAggregatedResponseDelta(ginCtx *gin.Context, attempt *upstreamAttempt, delta string) {
+	if ginCtx == nil || attempt == nil || delta == "" {
+		return
+	}
+	state := getAggregatedAPIResponse(ginCtx)
+	state.appendAttemptDelta(attempt.index, delta, strings.HasSuffix(attempt.response.String(), "\n"))
+	state.syncContext(ginCtx)
 }
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
@@ -115,9 +237,10 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
-	ensureResponseIntro(attempt)
+	_, attempt := ensureAttempt(ginCtx)
 
+	beforeLen := attempt.response.Len()
+	ensureResponseIntro(attempt)
 	if status > 0 && !attempt.statusWritten {
 		attempt.response.WriteString(fmt.Sprintf("Status: %d\n", status))
 		attempt.statusWritten = true
@@ -128,8 +251,7 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 		attempt.headersWritten = true
 		attempt.response.WriteString("\n")
 	}
-
-	updateAggregatedResponse(ginCtx, attempts)
+	appendAggregatedResponseDelta(ginCtx, attempt, attempt.response.String()[beforeLen:])
 }
 
 func isStreamingResponseHeaders(headers http.Header) bool {
@@ -147,11 +269,11 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
-	ensureResponseIntro(attempt)
+	_, attempt := ensureAttempt(ginCtx)
 
+	beforeLen := attempt.response.Len()
+	ensureResponseIntro(attempt)
 	if attempt.bodyStarted && !attempt.bodyHasContent {
-		// Ensure body does not stay empty marker if error arrives first.
 		attempt.bodyStarted = false
 	}
 	if attempt.errorWritten {
@@ -159,8 +281,7 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	}
 	attempt.response.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
 	attempt.errorWritten = true
-
-	updateAggregatedResponse(ginCtx, attempts)
+	appendAggregatedResponseDelta(ginCtx, attempt, attempt.response.String()[beforeLen:])
 }
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
@@ -179,9 +300,10 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
-	ensureResponseIntro(attempt)
+	_, attempt := ensureAttempt(ginCtx)
 
+	beforeLen := attempt.response.Len()
+	ensureResponseIntro(attempt)
 	if !attempt.headersWritten {
 		attempt.response.WriteString("Headers:\n")
 		writeHeaders(attempt.response, nil)
@@ -204,8 +326,7 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	attempt.response.WriteString(string(data))
 	attempt.bodyHasContent = true
 	attempt.prevWasSSEEvent = currentChunkIsSSEEvent
-
-	updateAggregatedResponse(ginCtx, attempts)
+	appendAggregatedResponseDelta(ginCtx, attempt, attempt.response.String()[beforeLen:])
 }
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
@@ -381,6 +502,7 @@ func ensureAttempt(ginCtx *gin.Context) ([]*upstreamAttempt, *upstreamAttempt) {
 		attempts = []*upstreamAttempt{attempt}
 		ginCtx.Set(apiAttemptsKey, attempts)
 		updateAggregatedRequest(ginCtx, attempts)
+		getAggregatedAPIResponse(ginCtx)
 	}
 	return attempts, attempts[len(attempts)-1]
 }
@@ -410,24 +532,9 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 	if ginCtx == nil {
 		return
 	}
-	var builder strings.Builder
-	for idx, attempt := range attempts {
-		if attempt == nil || attempt.response == nil {
-			continue
-		}
-		responseText := attempt.response.String()
-		if responseText == "" {
-			continue
-		}
-		builder.WriteString(responseText)
-		if !strings.HasSuffix(responseText, "\n") {
-			builder.WriteString("\n")
-		}
-		if idx < len(attempts)-1 {
-			builder.WriteString("\n")
-		}
-	}
-	ginCtx.Set(apiResponseKey, []byte(builder.String()))
+	state := getAggregatedAPIResponse(ginCtx)
+	state.rebuild(attempts)
+	state.syncContext(ginCtx)
 }
 
 func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {

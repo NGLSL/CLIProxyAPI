@@ -17,32 +17,37 @@ import (
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
 const responseBodyOverrideContextKey = "RESPONSE_BODY_OVERRIDE"
 const websocketTimelineOverrideContextKey = "WEBSOCKET_TIMELINE_OVERRIDE"
+const nonStreamingSuccessResponseLogBodyLimit = 4 << 20
+const truncatedRequestBodyLogNote = "\n\n[request body truncated in request log after 4 MiB]"
+const truncatedResponseBodyLogNote = "\n\n[response body truncated in request log after 4 MiB]"
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
 type RequestInfo struct {
-	URL       string              // URL is the request URL.
-	Method    string              // Method is the HTTP method (e.g., GET, POST).
-	Headers   map[string][]string // Headers contains the request headers.
-	Body      []byte              // Body is the raw request body.
-	RequestID string              // RequestID is the unique identifier for the request.
-	Timestamp time.Time           // Timestamp is when the request was received.
+	URL           string              // URL is the request URL.
+	Method        string              // Method is the HTTP method (e.g., GET, POST).
+	Headers       map[string][]string // Headers contains the request headers.
+	Body          []byte              // Body is the raw request body or captured prefix when truncated.
+	BodyTruncated bool                // BodyTruncated indicates whether Body only contains a captured prefix.
+	RequestID     string              // RequestID is the unique identifier for the request.
+	Timestamp     time.Time           // Timestamp is when the request was received.
 }
 
 // ResponseWriterWrapper wraps the standard gin.ResponseWriter to intercept and log response data.
 // It is designed to handle both standard and streaming responses, ensuring that logging operations do not block the client response.
 type ResponseWriterWrapper struct {
 	gin.ResponseWriter
-	body                *bytes.Buffer              // body is a buffer to store the response body for non-streaming responses.
-	isStreaming         bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
-	streamWriter        logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
-	chunkChannel        chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
-	streamDone          chan struct{}              // streamDone signals when the streaming goroutine completes.
-	logger              logging.RequestLogger      // logger is the instance of the request logger service.
-	requestInfo         *RequestInfo               // requestInfo holds the details of the original request.
-	statusCode          int                        // statusCode stores the HTTP status code of the response.
-	headers             map[string][]string        // headers stores the response headers.
-	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
-	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
+	body                  *bytes.Buffer              // body is a buffer to store the response body for non-streaming responses.
+	isStreaming           bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
+	streamWriter          logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
+	chunkChannel          chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
+	streamDone            chan struct{}              // streamDone signals when the streaming goroutine completes.
+	logger                logging.RequestLogger      // logger is the instance of the request logger service.
+	requestInfo           *RequestInfo               // requestInfo holds the details of the original request.
+	statusCode            int                        // statusCode stores the HTTP status code of the response.
+	headers               map[string][]string        // headers stores the response headers.
+	logOnErrorOnly        bool                       // logOnErrorOnly enables logging only when an error response is detected.
+	firstChunkTimestamp   time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
+	responseBodyTruncated bool                       // responseBodyTruncated indicates whether non-streaming success response logging hit the in-memory limit.
 }
 
 // NewResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -93,7 +98,7 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 	}
 
 	if w.shouldBufferResponseBody() {
-		w.body.Write(data)
+		w.appendResponseBodyForLogging(data)
 	}
 
 	return n, err
@@ -106,15 +111,104 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 	if !w.logOnErrorOnly {
 		return false
 	}
+	return w.currentStatusCodeForBuffering() >= http.StatusBadRequest
+}
+
+func (w *ResponseWriterWrapper) currentStatusCodeForBuffering() int {
 	status := w.statusCode
-	if status == 0 {
-		if statusWriter, ok := w.ResponseWriter.(interface{ Status() int }); ok && statusWriter != nil {
-			status = statusWriter.Status()
-		} else {
-			status = http.StatusOK
-		}
+	if status != 0 {
+		return status
 	}
-	return status >= http.StatusBadRequest
+	if statusWriter, ok := w.ResponseWriter.(interface{ Status() int }); ok && statusWriter != nil {
+		status = statusWriter.Status()
+	}
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return status
+}
+
+func (w *ResponseWriterWrapper) shouldLimitResponseBodyLogging() bool {
+	if w.logger == nil || !w.logger.IsEnabled() {
+		return false
+	}
+	return w.currentStatusCodeForBuffering() < http.StatusBadRequest
+}
+
+func (w *ResponseWriterWrapper) appendResponseBodyForLogging(data []byte) {
+	if w.body == nil || len(data) == 0 {
+		return
+	}
+	if !w.shouldLimitResponseBodyLogging() {
+		_, _ = w.body.Write(data)
+		return
+	}
+	if w.responseBodyTruncated {
+		return
+	}
+
+	remaining := nonStreamingSuccessResponseLogBodyLimit - w.body.Len()
+	if remaining <= 0 {
+		w.responseBodyTruncated = true
+		return
+	}
+	if len(data) <= remaining {
+		_, _ = w.body.Write(data)
+		return
+	}
+
+	_, _ = w.body.Write(data[:remaining])
+	w.responseBodyTruncated = true
+}
+
+func (w *ResponseWriterWrapper) appendResponseStringForLogging(data string) {
+	if w.body == nil || len(data) == 0 {
+		return
+	}
+	if !w.shouldLimitResponseBodyLogging() {
+		_, _ = w.body.WriteString(data)
+		return
+	}
+	if w.responseBodyTruncated {
+		return
+	}
+
+	remaining := nonStreamingSuccessResponseLogBodyLimit - w.body.Len()
+	if remaining <= 0 {
+		w.responseBodyTruncated = true
+		return
+	}
+	if len(data) <= remaining {
+		_, _ = w.body.WriteString(data)
+		return
+	}
+
+	_, _ = w.body.WriteString(data[:remaining])
+	w.responseBodyTruncated = true
+}
+
+func (w *ResponseWriterWrapper) truncatedResponseBody() []byte {
+	if w.body == nil {
+		return []byte(truncatedResponseBodyLogNote)
+	}
+	body := w.body.Bytes()
+	truncated := make([]byte, 0, len(body)+len(truncatedResponseBodyLogNote))
+	truncated = append(truncated, body...)
+	truncated = append(truncated, truncatedResponseBodyLogNote...)
+	return truncated
+}
+
+func (w *ResponseWriterWrapper) currentResponseBodyForLogging() []byte {
+	if w.body == nil || w.body.Len() == 0 {
+		if w.responseBodyTruncated {
+			return []byte(truncatedResponseBodyLogNote)
+		}
+		return nil
+	}
+	if w.responseBodyTruncated {
+		return w.truncatedResponseBody()
+	}
+	return w.body.Bytes()
 }
 
 // WriteString wraps the underlying ResponseWriter's WriteString method to capture response data.
@@ -140,7 +234,7 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 	}
 
 	if w.shouldBufferResponseBody() {
-		w.body.WriteString(data)
+		w.appendResponseStringForLogging(data)
 	}
 	return n, err
 }
@@ -385,20 +479,29 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 	if body := extractBodyOverride(c, requestBodyOverrideContextKey); len(body) > 0 {
 		return body
 	}
-	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
+	if w.requestInfo == nil {
+		return nil
+	}
+	if len(w.requestInfo.Body) == 0 {
+		if w.requestInfo.BodyTruncated {
+			return []byte(truncatedRequestBodyLogNote)
+		}
+		return nil
+	}
+	if !w.requestInfo.BodyTruncated {
 		return w.requestInfo.Body
 	}
-	return nil
+	body := make([]byte, 0, len(w.requestInfo.Body)+len(truncatedRequestBodyLogNote))
+	body = append(body, w.requestInfo.Body...)
+	body = append(body, truncatedRequestBodyLogNote...)
+	return body
 }
 
 func (w *ResponseWriterWrapper) extractResponseBody(c *gin.Context) []byte {
 	if body := extractBodyOverride(c, responseBodyOverrideContextKey); len(body) > 0 {
 		return body
 	}
-	if w.body == nil || w.body.Len() == 0 {
-		return nil
-	}
-	return bytes.Clone(w.body.Bytes())
+	return w.currentResponseBodyForLogging()
 }
 
 func (w *ResponseWriterWrapper) extractWebsocketTimeline(c *gin.Context) []byte {

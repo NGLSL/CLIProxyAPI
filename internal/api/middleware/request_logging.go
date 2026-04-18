@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -16,6 +17,7 @@ import (
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
+const requestLogBodyPrefixLimit = nonStreamingSuccessResponseLogBodyLimit
 
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
 // It captures detailed information about the request and response, including headers and body,
@@ -106,8 +108,9 @@ func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
 }
 
 // captureRequestInfo extracts relevant information from the incoming HTTP request.
-// It captures the URL, method, headers, and body. The request body is read and then
-// restored so that it can be processed by subsequent handlers.
+// It captures the URL, method, headers, and a bounded request body prefix. The consumed
+// prefix is then stitched back in front of the original body so downstream handlers can
+// still read the complete request payload.
 func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) {
 	// Capture URL with sensitive query parameters masked
 	maskedQuery := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
@@ -127,26 +130,68 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 
 	// Capture request body
 	var body []byte
+	bodyTruncated := false
 	if captureBody && c.Request.Body != nil {
-		// Read the body
-		bodyBytes, err := io.ReadAll(c.Request.Body)
+		consumedPrefix, bodyPrefix, truncated, err := captureRequestBodyPrefix(c.Request.Body, requestLogBodyPrefixLimit)
 		if err != nil {
 			return nil, err
 		}
-
-		// Restore the body for the actual request processing
-		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-		body = bodyBytes
+		c.Request.Body = newReplayedRequestBody(consumedPrefix, c.Request.Body)
+		body = bodyPrefix
+		bodyTruncated = truncated
 	}
 
 	return &RequestInfo{
-		URL:       url,
-		Method:    method,
-		Headers:   headers,
-		Body:      body,
-		RequestID: logging.GetGinRequestID(c),
-		Timestamp: time.Now(),
+		URL:           url,
+		Method:        method,
+		Headers:       headers,
+		Body:          body,
+		BodyTruncated: bodyTruncated,
+		RequestID:     logging.GetGinRequestID(c),
+		Timestamp:     time.Now(),
 	}, nil
+}
+
+func captureRequestBodyPrefix(body io.ReadCloser, limit int) ([]byte, []byte, bool, error) {
+	if body == nil || limit < 0 {
+		return nil, nil, false, nil
+	}
+
+	readLimit := int64(limit) + 1
+	consumedPrefix, err := io.ReadAll(io.LimitReader(body, readLimit))
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("read request body prefix: %w", err)
+	}
+	if len(consumedPrefix) <= limit {
+		return consumedPrefix, consumedPrefix, false, nil
+	}
+	return consumedPrefix, consumedPrefix[:limit], true, nil
+}
+
+func newReplayedRequestBody(consumedPrefix []byte, originalBody io.ReadCloser) io.ReadCloser {
+	return &replayedRequestBody{
+		reader: io.MultiReader(bytes.NewReader(consumedPrefix), originalBody),
+		body:   originalBody,
+	}
+}
+
+type replayedRequestBody struct {
+	reader io.Reader
+	body   io.ReadCloser
+}
+
+func (r *replayedRequestBody) Read(p []byte) (int, error) {
+	if r == nil || r.reader == nil {
+		return 0, io.EOF
+	}
+	return r.reader.Read(p)
+}
+
+func (r *replayedRequestBody) Close() error {
+	if r == nil || r.body == nil {
+		return nil
+	}
+	return r.body.Close()
 }
 
 // shouldLogRequest determines whether the request should be logged.
