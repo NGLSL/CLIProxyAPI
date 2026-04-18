@@ -200,6 +200,39 @@ func TestNormalizeResponsesWebsocketRequestCreate(t *testing.T) {
 	}
 }
 
+func TestNormalizeResponsesWebsocketRequestUsesClientMetadataAlias(t *testing.T) {
+	raw := []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}],"client_metadata":{"source":"codex"}}`)
+
+	normalized, last, errMsg := normalizeResponsesWebsocketRequest(raw, nil, nil)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := gjson.GetBytes(normalized, "metadata.source").String(); got != "codex" {
+		t.Fatalf("metadata.source = %q, want %q; normalized=%s", got, "codex", normalized)
+	}
+	if gjson.GetBytes(normalized, "client_metadata").Exists() {
+		t.Fatalf("client_metadata leaked into normalized request: %s", normalized)
+	}
+	if !bytes.Equal(last, normalized) {
+		t.Fatalf("last request snapshot should match normalized request")
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestDropsExplicitMetadata(t *testing.T) {
+	raw := []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}],"metadata":{"source":"explicit"}}`)
+
+	normalized, last, errMsg := normalizeResponsesWebsocketRequest(raw, nil, nil)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if gjson.GetBytes(normalized, "metadata").Exists() {
+		t.Fatalf("metadata leaked into normalized request: %s", normalized)
+	}
+	if !bytes.Equal(last, normalized) {
+		t.Fatalf("last request snapshot should match normalized request")
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestCreateWithHistory(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
 	lastResponseOutput := []byte(`[
@@ -654,6 +687,18 @@ func TestRecordResponsesWebsocketCustomToolCallsFromOutputItemDoneWithCache(t *t
 	}
 }
 
+func TestBuildResponsesWebsocketMetadataPayload(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("OpenAI-Model", "gpt-5.4")
+	payload := buildResponsesWebsocketMetadataPayload(headers)
+	if gjson.GetBytes(payload, "type").String() != wsEventTypeMetadata {
+		t.Fatalf("type = %s, want %s", gjson.GetBytes(payload, "type").String(), wsEventTypeMetadata)
+	}
+	if gjson.GetBytes(payload, "headers.openai-model").String() != "gpt-5.4" {
+		t.Fatalf("headers.openai-model = %q, want %q", gjson.GetBytes(payload, "headers.openai-model").String(), "gpt-5.4")
+	}
+}
+
 func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -689,6 +734,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 			errCh,
 			&timelineLog,
 			"session-1",
+			nil,
 		)
 		if err != nil {
 			serverErrCh <- err
@@ -768,6 +814,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 			errCh,
 			&timelineLog,
 			"session-1",
+			nil,
 		)
 		if err == nil {
 			serverErrCh <- errors.New("expected websocket write failure")
@@ -936,7 +983,8 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 		t.Fatalf("prewarm total tokens = %d, want 0", gjson.GetBytes(completedPayload, "response.usage.total_tokens").Int())
 	}
 
-	secondRequest := fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"input":[{"type":"message","id":"msg-1"}]}`, prewarmResponseID)
+	secondRequest := fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"input":[{"type":"message","id":"msg-1"}],"client_metadata":{"source":"codex"}}`, prewarmResponseID)
+
 	errWrite = conn.WriteMessage(websocket.TextMessage, []byte(secondRequest))
 	if errWrite != nil {
 		t.Fatalf("write follow-up websocket message: %v", errWrite)
@@ -964,6 +1012,12 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	}
 	if gjson.GetBytes(forwarded, "model").String() != "test-model" {
 		t.Fatalf("forwarded model = %s, want test-model", gjson.GetBytes(forwarded, "model").String())
+	}
+	if got := gjson.GetBytes(forwarded, "metadata.source").String(); got != "codex" {
+		t.Fatalf("forwarded metadata.source = %q, want %q; payload=%s", got, "codex", forwarded)
+	}
+	if gjson.GetBytes(forwarded, "client_metadata").Exists() {
+		t.Fatalf("client_metadata leaked upstream: %s", forwarded)
 	}
 	input := gjson.GetBytes(forwarded, "input").Array()
 	if len(input) != 1 || input[0].Get("id").String() != "msg-1" {

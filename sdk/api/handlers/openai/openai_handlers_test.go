@@ -1,10 +1,113 @@
 package openai
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v6/sdk/api/handlers"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
+
+type chatCaptureExecutor struct {
+	calls        int
+	sourceFormat string
+}
+
+func (e *chatCaptureExecutor) Identifier() string { return "test-provider" }
+
+func (e *chatCaptureExecutor) Execute(_ context.Context, _ *coreauth.Auth, _ coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	e.calls++
+	e.sourceFormat = opts.SourceFormat.String()
+	return coreexecutor.Response{Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1}}`)}, nil
+}
+
+func (e *chatCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *chatCaptureExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *chatCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *chatCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func newOpenAIChatTestRouter(t *testing.T, executor *chatCaptureExecutor) http.Handler {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth-chat", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/chat/completions", h.ChatCompletions)
+	return router
+}
+
+func TestChatCompletionsRejectsResponsesPayload(t *testing.T) {
+	executor := &chatCaptureExecutor{}
+	router := newOpenAIChatTestRouter(t, executor)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model","input":"hello","instructions":"be helpful"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusBadRequest)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("executor calls = %d, want 0", executor.calls)
+	}
+	if !strings.Contains(resp.Body.String(), "/v1/responses") {
+		t.Fatalf("body = %q, want mention of /v1/responses", resp.Body.String())
+	}
+}
+
+func TestChatCompletionsAcceptsChatPayload(t *testing.T) {
+	executor := &chatCaptureExecutor{}
+	router := newOpenAIChatTestRouter(t, executor)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
+	}
+	if executor.sourceFormat != "openai" {
+		t.Fatalf("source format = %q, want %q", executor.sourceFormat, "openai")
+	}
+}
 
 func TestConvertCompletionsRequestToChatCompletionsPreservesCompatibleFields(t *testing.T) {
 	raw := []byte(`{
@@ -82,5 +185,26 @@ func TestConvertCompletionsRequestToChatCompletionsPreservesCompatibleFields(t *
 	}
 	if got := gjson.GetBytes(out, "extra_body.user").String(); got != "abc" {
 		t.Fatalf("extra_body.user = %q, want %q", got, "abc")
+	}
+}
+
+func TestShouldRejectResponsesFormat(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "chat payload", body: `{"messages":[{"role":"user","content":"hi"}]}`, want: false},
+		{name: "responses input", body: `{"input":"hi"}`, want: true},
+		{name: "responses instructions", body: `{"instructions":"be helpful"}`, want: true},
+		{name: "responses previous response id", body: `{"previous_response_id":"resp_1"}`, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldRejectResponsesFormat([]byte(tt.body)); got != tt.want {
+				t.Fatalf("shouldRejectResponsesFormat() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

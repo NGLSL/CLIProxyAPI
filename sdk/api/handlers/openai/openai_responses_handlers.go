@@ -232,7 +232,7 @@ func responsesSSEHasTerminalEvent(chunk []byte) bool {
 		}
 		if bytes.HasPrefix(line, []byte("event:")) {
 			eventType = string(bytes.TrimSpace(line[len("event:"):]))
-			if eventType == "response.completed" || eventType == "response.incomplete" {
+			if eventType == "response.completed" || eventType == "response.incomplete" || eventType == "response.failed" {
 				return true
 			}
 			continue
@@ -245,34 +245,70 @@ func responsesSSEHasTerminalEvent(chunk []byte) bool {
 			continue
 		}
 		typeField := gjson.GetBytes(data, "type").String()
-		if typeField == "response.completed" || typeField == "response.incomplete" {
+		if typeField == "response.completed" || typeField == "response.incomplete" || typeField == "response.failed" {
 			return true
 		}
 	}
-	return eventType == "response.completed" || eventType == "response.incomplete"
+	return eventType == "response.completed" || eventType == "response.incomplete" || eventType == "response.failed"
+}
+
+func responsesErrorStatusAndText(errMsg *interfaces.ErrorMessage) (int, string) {
+	status := http.StatusInternalServerError
+	if errMsg != nil && errMsg.StatusCode > 0 {
+		status = errMsg.StatusCode
+	}
+	errText := http.StatusText(status)
+	if errMsg != nil && errMsg.Error != nil && errMsg.Error.Error() != "" {
+		errText = errMsg.Error.Error()
+	}
+	return status, errText
+}
+
+func responsesFailedPayload(errMsg *interfaces.ErrorMessage, responseID string) []byte {
+	status, errText := responsesErrorStatusAndText(errMsg)
+	errorNode := []byte(`{"message":"","code":"","type":"server_error"}`)
+	streamError := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+	if json.Valid(streamError) {
+		if message := strings.TrimSpace(gjson.GetBytes(streamError, "message").String()); message != "" {
+			errorNode, _ = sjson.SetBytes(errorNode, "message", message)
+		}
+		if code := strings.TrimSpace(gjson.GetBytes(streamError, "code").String()); code != "" {
+			errorNode, _ = sjson.SetBytes(errorNode, "code", code)
+		}
+	}
+	body := handlers.BuildErrorResponseBody(status, errText)
+	if json.Valid(body) {
+		if message := strings.TrimSpace(gjson.GetBytes(body, "error.message").String()); message != "" {
+			errorNode, _ = sjson.SetBytes(errorNode, "message", message)
+		}
+		if errorType := strings.TrimSpace(gjson.GetBytes(body, "error.type").String()); errorType != "" {
+			errorNode, _ = sjson.SetBytes(errorNode, "type", errorType)
+		}
+		if code := strings.TrimSpace(gjson.GetBytes(body, "error.code").String()); code != "" {
+			errorNode, _ = sjson.SetBytes(errorNode, "code", code)
+		}
+	}
+	payload := []byte(`{"type":"response.failed","sequence_number":0,"response":{"object":"response","status":"failed","error":{}}}`)
+	if responseID = strings.TrimSpace(responseID); responseID != "" {
+		payload, _ = sjson.SetBytes(payload, "response.id", responseID)
+	}
+	payload, _ = sjson.SetRawBytes(payload, "response.error", errorNode)
+	return payload
 }
 
 func responsesSSETerminalEOFError() *interfaces.ErrorMessage {
 	return &interfaces.ErrorMessage{
 		StatusCode: http.StatusRequestTimeout,
-		Error:      fmt.Errorf("stream closed before response.completed or response.incomplete"),
+		Error:      fmt.Errorf("stream closed before response.completed, response.incomplete, or response.failed"),
 	}
 }
 
-func responsesSSEWriteTerminalError(w io.Writer, errMsg *interfaces.ErrorMessage) {
+func responsesSSEWriteTerminalError(w io.Writer, errMsg *interfaces.ErrorMessage, responseID string) {
 	if errMsg == nil {
 		return
 	}
-	status := http.StatusInternalServerError
-	if errMsg.StatusCode > 0 {
-		status = errMsg.StatusCode
-	}
-	errText := http.StatusText(status)
-	if errMsg.Error != nil && errMsg.Error.Error() != "" {
-		errText = errMsg.Error.Error()
-	}
-	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
-	_, _ = fmt.Fprintf(w, "\nevent: error\ndata: %s\n\n", string(chunk))
+	payload := responsesFailedPayload(errMsg, responseID)
+	_, _ = fmt.Fprintf(w, "\nevent: response.failed\ndata: %s\n\n", string(payload))
 }
 
 func responsesSSEFinalError(framer *responsesSSEFramer) *interfaces.ErrorMessage {
@@ -284,7 +320,11 @@ func responsesSSEFinalError(framer *responsesSSEFramer) *interfaces.ErrorMessage
 
 func responsesSSEWriteDone(w io.Writer, framer *responsesSSEFramer) *interfaces.ErrorMessage {
 	if errMsg := responsesSSEFinalError(framer); errMsg != nil {
-		responsesSSEWriteTerminalError(w, errMsg)
+		responseID := ""
+		if framer != nil {
+			responseID = framer.terminalResponseID
+		}
+		responsesSSEWriteTerminalError(w, errMsg, responseID)
 		return errMsg
 	}
 	_, _ = w.Write([]byte("\n"))
@@ -423,6 +463,28 @@ func (h *OpenAIResponsesAPIHandler) HandlerType() string {
 	return OpenaiResponse
 }
 
+func normalizeResponsesClientMetadata(rawJSON []byte) ([]byte, *interfaces.ErrorMessage) {
+	normalized := rawJSON
+	if gjson.GetBytes(normalized, "metadata").Exists() {
+		if updated, errDelete := sjson.DeleteBytes(normalized, "metadata"); errDelete == nil {
+			normalized = updated
+		}
+	}
+
+	clientMetadata := gjson.GetBytes(normalized, "client_metadata")
+	if !clientMetadata.Exists() {
+		return normalized, nil
+	}
+
+	if updated, errSet := sjson.SetRawBytes(normalized, "metadata", []byte(clientMetadata.Raw)); errSet == nil {
+		normalized = updated
+	}
+	if updated, errDelete := sjson.DeleteBytes(normalized, "client_metadata"); errDelete == nil {
+		normalized = updated
+	}
+	return normalized, nil
+}
+
 // Models returns the OpenAIResponses-compatible model metadata supported by this handler.
 func (h *OpenAIResponsesAPIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
@@ -483,7 +545,7 @@ func responsesResponseIDFromChunk(chunk []byte) string {
 			continue
 		}
 		typ := strings.TrimSpace(gjson.GetBytes(data, "type").String())
-		if typ != "response.completed" && typ != "response.incomplete" {
+		if typ != "response.completed" && typ != "response.incomplete" && typ != "response.failed" {
 			continue
 		}
 		if responseID := strings.TrimSpace(gjson.GetBytes(data, "response.id").String()); responseID != "" {
@@ -607,6 +669,13 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		return
 	}
 
+	normalizedJSON, errMsg := normalizeResponsesClientMetadata(rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = normalizedJSON
+
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
@@ -628,6 +697,13 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		})
 		return
 	}
+
+	normalizedJSON, errMsg := normalizeResponsesClientMetadata(rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = normalizedJSON
 
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
@@ -792,7 +868,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			framer.Flush(c.Writer)
-			responsesSSEWriteTerminalError(c.Writer, errMsg)
+			responsesSSEWriteTerminalError(c.Writer, errMsg, framer.terminalResponseID)
 		},
 		WriteDone: func() {
 			framer.Flush(c.Writer)

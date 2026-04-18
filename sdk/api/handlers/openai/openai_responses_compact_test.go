@@ -14,12 +14,14 @@ import (
 	coreexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 type compactCaptureExecutor struct {
-	alt          string
-	sourceFormat string
-	calls        int
+	alt            string
+	sourceFormat   string
+	calls          int
+	compactPayload []byte
 }
 
 func (e *compactCaptureExecutor) Identifier() string { return "test-provider" }
@@ -28,6 +30,7 @@ func (e *compactCaptureExecutor) Execute(ctx context.Context, auth *coreauth.Aut
 	e.calls++
 	e.alt = opts.Alt
 	e.sourceFormat = opts.SourceFormat.String()
+	e.compactPayload = append([]byte(nil), req.Payload...)
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
 
@@ -116,5 +119,80 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	}
 	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestOpenAIResponsesCompactUsesClientMetadataAlias(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth3", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","input":"hello","client_metadata":{"source":"codex"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if got := gjson.GetBytes(executor.compactPayload, "metadata.source").String(); got != "codex" {
+		t.Fatalf("metadata.source = %q, want %q; payload=%s", got, "codex", executor.compactPayload)
+	}
+	if gjson.GetBytes(executor.compactPayload, "client_metadata").Exists() {
+		t.Fatalf("client_metadata leaked into compact payload: %s", executor.compactPayload)
+	}
+}
+
+func TestOpenAIResponsesCompactDropsExplicitMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth4", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","input":"hello","metadata":{"source":"explicit"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
+	}
+	if gjson.GetBytes(executor.compactPayload, "metadata").Exists() {
+		t.Fatalf("metadata leaked into compact payload: %s", executor.compactPayload)
+	}
+	if gjson.GetBytes(executor.compactPayload, "client_metadata").Exists() {
+		t.Fatalf("client_metadata leaked into compact payload: %s", executor.compactPayload)
 	}
 }

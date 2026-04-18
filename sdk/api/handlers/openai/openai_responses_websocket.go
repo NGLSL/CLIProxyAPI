@@ -30,9 +30,12 @@ const (
 	wsRequestTypeAppend  = "response.append"
 	wsEventTypeError     = "error"
 	wsEventTypeCompleted = "response.completed"
+	wsEventTypeFailed    = "response.failed"
+	wsEventTypeMetadata  = "codex.response.metadata"
 	wsDoneMarker         = "[DONE]"
 	wsTurnStateHeader    = "x-codex-turn-state"
 	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
+	wsHeaderOpenAIModel  = "openai-model"
 )
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
@@ -188,9 +191,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			})
 		}
-		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+		dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
-		completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID)
+		completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID, upstreamHeaders)
+		if responsesWebsocketShouldResetContinuation(errForward, completedOutput) {
+			lastRequest = nil
+			lastResponseOutput = []byte("[]")
+			continue
+		}
 		if errForward != nil {
 			wsTerminateErr = errForward
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
@@ -226,6 +234,11 @@ func normalizeResponsesWebsocketRequest(rawJSON []byte, lastRequest []byte, last
 }
 
 func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, allowIncrementalInputWithPreviousResponseID bool) ([]byte, []byte, *interfaces.ErrorMessage) {
+	normalizedJSON, errMsg := normalizeResponsesClientMetadata(rawJSON)
+	if errMsg != nil {
+		return nil, lastRequest, errMsg
+	}
+	rawJSON = normalizedJSON
 	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
 	switch requestType {
 	case wsRequestTypeCreate:
@@ -711,12 +724,21 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsTimelineLog *strings.Builder,
 	sessionID string,
+	upstreamHeaders http.Header,
 ) ([]byte, error) {
 	completed := false
+	failed := false
 	completedOutput := []byte("[]")
 	downstreamSessionKey := ""
 	if c != nil && c.Request != nil {
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
+	}
+
+	if metadataPayload := buildResponsesWebsocketMetadataPayload(upstreamHeaders); len(metadataPayload) > 0 {
+		if errWrite := writeResponsesWebsocketPayload(conn, wsTimelineLog, metadataPayload, time.Now()); errWrite != nil {
+			cancel(errWrite)
+			return completedOutput, errWrite
+		}
 	}
 
 	for {
@@ -759,10 +781,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			return completedOutput, nil
 		case chunk, ok := <-data:
 			if !ok {
-				if !completed {
+				if !completed && !failed {
 					errMsg := &interfaces.ErrorMessage{
 						StatusCode: http.StatusRequestTimeout,
-						Error:      fmt.Errorf("stream closed before response.completed"),
+						Error:      fmt.Errorf("stream closed before response.completed or response.failed"),
 					}
 					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 					markAPIResponseTimestamp(c)
@@ -799,6 +821,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i])
 				}
+				if eventType == wsEventTypeFailed {
+					failed = true
+				}
 				markAPIResponseTimestamp(c)
 				// log.Infof(
 				// 	"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
@@ -820,6 +845,43 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			}
 		}
 	}
+}
+
+func responsesWebsocketShouldResetContinuation(errForward error, completedOutput []byte) bool {
+	if errForward == nil {
+		return false
+	}
+	if len(gjson.ParseBytes(completedOutput).Array()) > 0 {
+		return false
+	}
+	return true
+}
+
+func buildResponsesWebsocketMetadataPayload(headers http.Header) []byte {
+	if len(headers) == 0 {
+		return nil
+	}
+	payload := []byte(`{"type":"codex.response.metadata","headers":{}}`)
+	hasHeaders := false
+	for key, values := range headers {
+		if len(values) == 0 {
+			continue
+		}
+		if strings.TrimSpace(values[0]) == "" {
+			continue
+		}
+		headerPath := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(key), `\\`, `\\\\`), ".", `\\.`)
+		var errSet error
+		payload, errSet = sjson.SetBytes(payload, "headers."+headerPath, values[0])
+		if errSet != nil {
+			continue
+		}
+		hasHeaders = true
+	}
+	if !hasHeaders {
+		return nil
+	}
+	return payload
 }
 
 func responseCompletedOutputFromPayload(payload []byte) []byte {

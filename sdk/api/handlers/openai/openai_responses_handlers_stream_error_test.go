@@ -34,10 +34,10 @@ func TestForwardResponsesStreamTerminalErrorUsesResponsesErrorChunk(t *testing.T
 
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 	body := recorder.Body.String()
-	if !strings.Contains(body, `"type":"error"`) {
-		t.Fatalf("expected responses error chunk, got: %q", body)
+	if !strings.Contains(body, `"type":"response.failed"`) {
+		t.Fatalf("expected responses failed chunk, got: %q", body)
 	}
-	if strings.Contains(body, `"error":{`) {
-		t.Fatalf("expected streaming error chunk (top-level type), got HTTP error body: %q", body)
+	if !strings.Contains(body, `"response":{"object":"response","status":"failed","error":{`) {
+		t.Fatalf("expected failed response payload with nested response.error, got: %q", body)
 	}
 }

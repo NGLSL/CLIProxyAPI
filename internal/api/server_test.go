@@ -200,6 +200,32 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 	}
 }
 
+func TestServerRegistersProtectedOpenAIRoutes(t *testing.T) {
+	server := newTestServer(t)
+
+	protectedPaths := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "chat completions", method: http.MethodPost, path: "/v1/chat/completions"},
+		{name: "responses", method: http.MethodPost, path: "/v1/responses"},
+		{name: "responses compact", method: http.MethodPost, path: "/v1/responses/compact"},
+	}
+
+	for _, tc := range protectedPaths {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized {
+				t.Fatalf("unexpected status code for %s: got %d want %d; body=%s", tc.path, rr.Code, http.StatusUnauthorized, rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 	t.Setenv("writable_path", "")

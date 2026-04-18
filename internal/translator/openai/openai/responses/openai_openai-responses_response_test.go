@@ -590,6 +590,73 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Preserve
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_EmitsReasoningTextDelta(t *testing.T) {
+	in := []string{
+		`data: {"id":"resp_reasoning","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":"step-1","tool_calls":null},"finish_reason":null}]}`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"gpt-5.4","reasoning":{"effort":"high","summary":"auto"}}`)
+
+	var param any
+	var sawDelta bool
+	for _, line := range in {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event != "response.reasoning_text.delta" {
+				continue
+			}
+			sawDelta = true
+			if got := data.Get("delta").String(); got != "step-1" {
+				t.Fatalf("delta = %q, want %q", got, "step-1")
+			}
+			if got := data.Get("content_index").Int(); got != 0 {
+				t.Fatalf("content_index = %d, want 0", got)
+			}
+		}
+	}
+	if !sawDelta {
+		t.Fatal("expected response.reasoning_text.delta event")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_EmitsCustomToolCallInputDelta(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.4","tools":[{"type":"custom","name":"apply_patch"}]}`)
+	in := []string{
+		`data: {"id":"resp_custom","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_custom","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"*** Begin Patch"}}]},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var sawAdded bool
+	var sawDelta bool
+	for _, line := range in {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			switch event {
+			case "response.output_item.added":
+				if data.Get("item.type").String() == "custom_tool_call" {
+					sawAdded = true
+				}
+			case "response.custom_tool_call_input.delta":
+				sawDelta = true
+				if got := data.Get("call_id").String(); got != "call_patch" {
+					t.Fatalf("call_id = %q, want %q", got, "call_patch")
+				}
+				if got := data.Get("delta").String(); got != "*** Begin Patch" {
+					t.Fatalf("delta = %q, want %q", got, "*** Begin Patch")
+				}
+			}
+		}
+	}
+	if !sawAdded {
+		t.Fatal("expected custom_tool_call output item")
+	}
+	if !sawDelta {
+		t.Fatal("expected response.custom_tool_call_input.delta event")
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompletedPreservesTranslatedResponsesRequestFields(t *testing.T) {
 	originalRequest := []byte(`{
 		"model":"ignored-model",

@@ -148,14 +148,14 @@ func TestForwardResponsesStreamWritesTerminalErrorWhenEOFComesBeforeResponsesTer
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	body := recorder.Body.String()
-	if !strings.Contains(body, "event: error\ndata: {") {
-		t.Fatalf("expected terminal SSE error event on clean EOF before responses terminal event.\nGot: %q", body)
+	if !strings.Contains(body, "event: response.failed\ndata: {") {
+		t.Fatalf("expected terminal SSE failed event on clean EOF before responses terminal event.\nGot: %q", body)
 	}
-	if !strings.Contains(body, `"type":"error"`) {
-		t.Fatalf("expected responses error chunk.\nGot: %q", body)
+	if !strings.Contains(body, `"type":"response.failed"`) {
+		t.Fatalf("expected responses failed chunk.\nGot: %q", body)
 	}
-	if strings.HasSuffix(body, "\n") && !strings.Contains(body, "event: error") {
-		t.Fatalf("expected more than trailing success newline.\nGot: %q", body)
+	if !strings.Contains(body, `"response":{"object":"response","status":"failed","error":{"message":"stream closed before response.completed, response.incomplete, or response.failed"`) {
+		t.Fatalf("expected failed payload to include timeout message.\nGot: %q", body)
 	}
 }
 
@@ -171,7 +171,7 @@ func TestForwardResponsesStreamKeepsCleanEOFSuccessAfterResponseCompleted(t *tes
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	body := recorder.Body.String()
-	if strings.Contains(body, "event: error") {
+	if strings.Contains(body, "event: response.failed") {
 		t.Fatalf("expected clean EOF after response.completed to remain successful.\nGot: %q", body)
 	}
 	want := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n\n"
@@ -192,7 +192,7 @@ func TestForwardResponsesStreamKeepsCleanEOFSuccessAfterResponseIncomplete(t *te
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	body := recorder.Body.String()
-	if strings.Contains(body, "event: error") {
+	if strings.Contains(body, "event: response.failed") {
 		t.Fatalf("expected clean EOF after response.incomplete to remain successful.\nGot: %q", body)
 	}
 	want := "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp-1\",\"status\":\"incomplete\",\"output\":[]}}\n\n\n"
@@ -213,11 +213,11 @@ func TestForwardResponsesStreamDropsIncompleteTrailingDataChunkOnFlush(t *testin
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	body := recorder.Body.String()
-	if !strings.Contains(body, "event: error\ndata: {") {
-		t.Fatalf("expected incomplete trailing data to terminate with SSE error event.\nGot: %q", body)
+	if !strings.Contains(body, "event: response.failed\ndata: {") {
+		t.Fatalf("expected incomplete trailing data to terminate with responses failed event.\nGot: %q", body)
 	}
-	if !strings.Contains(body, `"type":"error"`) {
-		t.Fatalf("expected responses error chunk after incomplete trailing data.\nGot: %q", body)
+	if !strings.Contains(body, `"type":"response.failed"`) {
+		t.Fatalf("expected responses failed chunk after incomplete trailing data.\nGot: %q", body)
 	}
 }
 
