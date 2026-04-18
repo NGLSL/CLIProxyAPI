@@ -143,6 +143,25 @@ func shouldTreatAsResponsesFormat(rawJSON []byte) bool {
 	return false
 }
 
+func setRawJSONFieldIfExists(dst []byte, root gjson.Result, srcPath, dstPath string) []byte {
+	value := root.Get(srcPath)
+	if !value.Exists() {
+		return dst
+	}
+	updated, err := sjson.SetRawBytes(dst, dstPath, []byte(value.Raw))
+	if err != nil {
+		return dst
+	}
+	return updated
+}
+
+func copyRawJSONFieldsIfExists(dst []byte, root gjson.Result, fields ...string) []byte {
+	for _, field := range fields {
+		dst = setRawJSONFieldIfExists(dst, root, field, field)
+	}
+	return dst
+}
+
 // Completions handles the /v1/completions endpoint.
 // It determines whether the request is for a streaming or non-streaming response
 // and calls the appropriate handler based on the model provider.
@@ -241,6 +260,23 @@ func convertCompletionsRequestToChatCompletions(rawJSON []byte) []byte {
 	if echo := root.Get("echo"); echo.Exists() {
 		out, _ = sjson.SetBytes(out, "echo", echo.Bool())
 	}
+
+	out = copyRawJSONFieldsIfExists(out, root,
+		"metadata",
+		"service_tier",
+		"store",
+		"seed",
+		"parallel_tool_calls",
+		"response_format",
+		"modalities",
+		"audio",
+		"prediction",
+		"prompt_cache_key",
+		"prompt_cache_retention",
+		"extra_headers",
+		"extra_query",
+		"extra_body",
+	)
 
 	return out
 }

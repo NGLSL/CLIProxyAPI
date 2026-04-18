@@ -7,6 +7,25 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+func setRawJSONField(dst []byte, root gjson.Result, srcPath, dstPath string) []byte {
+	value := root.Get(srcPath)
+	if !value.Exists() {
+		return dst
+	}
+	updated, err := sjson.SetRawBytes(dst, dstPath, []byte(value.Raw))
+	if err != nil {
+		return dst
+	}
+	return updated
+}
+
+func copyRawJSONFields(dst []byte, root gjson.Result, fields ...string) []byte {
+	for _, field := range fields {
+		dst = setRawJSONField(dst, root, field, field)
+	}
+	return dst
+}
+
 // ConvertOpenAIResponsesRequestToOpenAIChatCompletions converts OpenAI responses format to OpenAI chat completions format.
 // It transforms the OpenAI responses API format (with instructions and input array) into the standard
 // OpenAI chat completions format (with messages array and system content).
@@ -47,6 +66,22 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Exists() {
 		out, _ = sjson.SetBytes(out, "parallel_tool_calls", parallelToolCalls.Bool())
 	}
+
+	out = copyRawJSONFields(out, root,
+		"metadata",
+		"service_tier",
+		"store",
+		"temperature",
+		"top_p",
+		"top_logprobs",
+		"prompt_cache_key",
+		"prompt_cache_retention",
+		"extra_headers",
+		"extra_query",
+		"extra_body",
+	)
+	out = setRawJSONField(out, root, "text.format", "response_format")
+	out = setRawJSONField(out, root, "reasoning.summary", "reasoning.summary")
 
 	// Convert instructions to system message
 	if instructions := root.Get("instructions"); instructions.Exists() {
@@ -207,7 +242,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetBytes(out, "tool_choice", toolChoice.String())
+		if toolChoice.IsObject() || toolChoice.IsArray() || toolChoice.Type == gjson.JSON {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+		} else {
+			out, _ = sjson.SetBytes(out, "tool_choice", toolChoice.String())
+		}
 	}
 
 	return out

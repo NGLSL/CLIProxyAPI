@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
@@ -279,5 +280,83 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	}
 	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
 		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestOpenAICompatExecutorExecutePassesThroughExtraFieldsAndRequestMetadata(t *testing.T) {
+	var gotPath string
+	var gotQuery string
+	var gotClientHeader string
+	var gotExtraHeader string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotClientHeader = r.Header.Get("X-Client")
+		gotExtraHeader = r.Header.Get("X-Extra")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{
+		"model":"gpt-4.1",
+		"messages":[{"role":"user","content":"hi"}],
+		"service_tier":"priority",
+		"extra_headers":{"X-Extra":"extra-value"},
+		"extra_query":{"provider":"openrouter","tags":["a","b"]},
+		"extra_body":{"seed":7,"user":"abc"}
+	}`)
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-4.1",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: payload,
+		Headers:         http.Header{"X-Client": []string{"client-value"}},
+		Query:           url.Values{"client": []string{"1"}, "provider": []string{"client-provider"}},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("Execute() returned empty payload")
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
+	}
+	if gotQuery != "client=1&provider=openrouter&tags=a&tags=b" {
+		t.Fatalf("query = %q, want %q", gotQuery, "client=1&provider=openrouter&tags=a&tags=b")
+	}
+	if gotClientHeader != "client-value" {
+		t.Fatalf("X-Client = %q, want %q", gotClientHeader, "client-value")
+	}
+	if gotExtraHeader != "extra-value" {
+		t.Fatalf("X-Extra = %q, want %q", gotExtraHeader, "extra-value")
+	}
+	if got := gjson.GetBytes(gotBody, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want %q", got, "priority")
+	}
+	if got := gjson.GetBytes(gotBody, "seed").Int(); got != 7 {
+		t.Fatalf("seed = %d, want %d", got, 7)
+	}
+	if got := gjson.GetBytes(gotBody, "user").String(); got != "abc" {
+		t.Fatalf("user = %q, want %q", got, "abc")
+	}
+	if gjson.GetBytes(gotBody, "extra_headers").Exists() {
+		t.Fatalf("extra_headers unexpectedly present in upstream body")
+	}
+	if gjson.GetBytes(gotBody, "extra_query").Exists() {
+		t.Fatalf("extra_query unexpectedly present in upstream body")
+	}
+	if gjson.GetBytes(gotBody, "extra_body").Exists() {
+		t.Fatalf("extra_body unexpectedly present in upstream body")
 	}
 }

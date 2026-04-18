@@ -53,3 +53,32 @@ func TestFilterUpstreamHeaders_ReturnsNilWhenAllHeadersBlocked(t *testing.T) {
 		t.Fatalf("expected nil when all headers are filtered, got %#v", filtered)
 	}
 }
+
+func TestFilterUpstreamHeaders_PreservesGatewayAndBusinessHeaders(t *testing.T) {
+	src := http.Header{}
+	src.Set("X-LiteLLM-Model-Id", "litellm-1")
+	src.Set("Helicone-RateLimit-Remaining", "9")
+	src.Set("X-Request-Id", "req-1")
+	src.Set("Content-Length", "123")
+	src.Set("Content-Encoding", "gzip")
+
+	filtered := FilterUpstreamHeaders(src)
+	if filtered == nil {
+		t.Fatalf("expected filtered headers, got nil")
+	}
+	if got := filtered.Get("X-LiteLLM-Model-Id"); got != "litellm-1" {
+		t.Fatalf("X-LiteLLM-Model-Id = %q, want %q", got, "litellm-1")
+	}
+	if got := filtered.Get("Helicone-RateLimit-Remaining"); got != "9" {
+		t.Fatalf("Helicone-RateLimit-Remaining = %q, want %q", got, "9")
+	}
+	if got := filtered.Get("X-Request-Id"); got != "req-1" {
+		t.Fatalf("X-Request-Id = %q, want %q", got, "req-1")
+	}
+	if got := filtered.Get("Content-Length"); got != "" {
+		t.Fatalf("Content-Length = %q, want empty", got)
+	}
+	if got := filtered.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want empty", got)
+	}
+}

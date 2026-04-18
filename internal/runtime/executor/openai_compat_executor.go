@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/tidwall/gjson"
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/runtime/executor/helps"
@@ -92,6 +95,185 @@ func (e *OpenAICompatExecutor) prepareUpstreamRequest(req *http.Request, auth *c
 	}
 }
 
+func cloneValues(values url.Values) url.Values {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(url.Values, len(values))
+	for key, items := range values {
+		cloned[key] = append([]string(nil), items...)
+	}
+	return cloned
+}
+
+func mergeQueryValues(dst, src url.Values) url.Values {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(url.Values, len(src))
+	}
+	for key, items := range src {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			continue
+		}
+		dst.Del(trimmedKey)
+		for _, item := range items {
+			dst.Add(trimmedKey, item)
+		}
+	}
+	return dst
+}
+
+func mergeForwardHeaders(dst, src http.Header, protectedKeys ...string) http.Header {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(http.Header, len(src))
+	}
+	protected := make(map[string]struct{}, len(protectedKeys))
+	for _, key := range protectedKeys {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(key))
+		if canonical != "" {
+			protected[canonical] = struct{}{}
+		}
+	}
+	for key, items := range src {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(key))
+		if canonical == "" {
+			continue
+		}
+		if _, blocked := protected[canonical]; blocked {
+			continue
+		}
+		dst.Del(canonical)
+		for _, item := range items {
+			trimmed := strings.TrimSpace(item)
+			if trimmed == "" {
+				continue
+			}
+			dst.Add(canonical, trimmed)
+		}
+	}
+	return dst
+}
+
+func mergeJSONObjects(base []byte, extra gjson.Result) ([]byte, error) {
+	if !extra.Exists() || !extra.IsObject() {
+		return base, nil
+	}
+	if len(base) == 0 {
+		base = []byte(`{}`)
+	}
+	result := base
+	var mergeErr error
+	extra.ForEach(func(key, value gjson.Result) bool {
+		result, mergeErr = sjson.SetRawBytes(result, key.String(), []byte(value.Raw))
+		return mergeErr == nil
+	})
+	if mergeErr != nil {
+		return base, mergeErr
+	}
+	return result, nil
+}
+
+func extraHeadersFromPayload(payload []byte) http.Header {
+	extraHeaders := gjson.GetBytes(payload, "extra_headers")
+	if !extraHeaders.Exists() || !extraHeaders.IsObject() {
+		return nil
+	}
+	headers := make(http.Header)
+	extraHeaders.ForEach(func(key, value gjson.Result) bool {
+		name := http.CanonicalHeaderKey(strings.TrimSpace(key.String()))
+		if name == "" {
+			return true
+		}
+		switch {
+		case value.IsArray():
+			for _, item := range value.Array() {
+				text := strings.TrimSpace(item.String())
+				if text != "" {
+					headers.Add(name, text)
+				}
+			}
+		default:
+			text := strings.TrimSpace(value.String())
+			if text != "" {
+				headers.Add(name, text)
+			}
+		}
+		return true
+	})
+	if len(headers) == 0 {
+		return nil
+	}
+	return headers
+}
+
+func extraQueryFromPayload(payload []byte) url.Values {
+	extraQuery := gjson.GetBytes(payload, "extra_query")
+	if !extraQuery.Exists() || !extraQuery.IsObject() {
+		return nil
+	}
+	query := make(url.Values)
+	extraQuery.ForEach(func(key, value gjson.Result) bool {
+		name := strings.TrimSpace(key.String())
+		if name == "" {
+			return true
+		}
+		switch {
+		case value.IsArray():
+			for _, item := range value.Array() {
+				query.Add(name, item.String())
+			}
+		default:
+			query.Add(name, value.String())
+		}
+		return true
+	})
+	if len(query) == 0 {
+		return nil
+	}
+	return query
+}
+
+func stripOpenAICompatExtras(payload []byte) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	for _, path := range []string{"extra_headers", "extra_query", "extra_body"} {
+		updated, errDelete := sjson.DeleteBytes(payload, path)
+		if errDelete != nil {
+			continue
+		}
+		payload = updated
+	}
+	return payload
+}
+
+func prepareOpenAICompatPayload(payload []byte, originalPayload []byte) ([]byte, http.Header, url.Values, error) {
+	prepared := payload
+	if len(prepared) == 0 {
+		prepared = []byte(`{}`)
+	}
+	extraHeaders := extraHeadersFromPayload(originalPayload)
+	extraQuery := extraQueryFromPayload(originalPayload)
+	prepared = stripOpenAICompatExtras(prepared)
+	prepared, err := mergeJSONObjects(prepared, gjson.GetBytes(originalPayload, "extra_body"))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if serviceTier := gjson.GetBytes(originalPayload, "service_tier"); serviceTier.Exists() {
+		prepared, err = sjson.SetRawBytes(prepared, "service_tier", []byte(serviceTier.Raw))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return prepared, extraHeaders, extraQuery, nil
+}
+
 // HttpRequest injects OpenAI-compatible credentials into the request and executes it.
 func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
@@ -145,14 +327,29 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
+	translated, extraHeaders, extraQuery, err := prepareOpenAICompatPayload(translated, originalPayload)
+	if err != nil {
+		return resp, fmt.Errorf("openai compat executor: prepare payload: %w", err)
+	}
 
-	url := strings.TrimSuffix(baseURL, "/") + endpoint
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	upstreamURL := strings.TrimSuffix(baseURL, "/") + endpoint
+	parsedURL, err := url.Parse(upstreamURL)
+	if err != nil {
+		return resp, fmt.Errorf("openai compat executor: parse upstream url: %w", err)
+	}
+	query := cloneValues(opts.Query)
+	query = mergeQueryValues(query, extraQuery)
+	if len(query) > 0 {
+		parsedURL.RawQuery = query.Encode()
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, parsedURL.String(), bytes.NewReader(translated))
 	if err != nil {
 		return resp, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	httpReq.Header = mergeForwardHeaders(httpReq.Header, opts.Headers, "Authorization", "Content-Type", "User-Agent")
+	httpReq.Header = mergeForwardHeaders(httpReq.Header, extraHeaders, "Authorization", "Content-Type", "User-Agent")
 	e.prepareUpstreamRequest(httpReq, auth, apiKey)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -161,7 +358,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
+		URL:       parsedURL.String(),
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
 		Body:      translated,
@@ -239,14 +436,29 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	translated, extraHeaders, extraQuery, err := prepareOpenAICompatPayload(translated, originalPayload)
+	if err != nil {
+		return nil, fmt.Errorf("openai compat executor: prepare payload: %w", err)
+	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	upstreamURL := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	parsedURL, err := url.Parse(upstreamURL)
+	if err != nil {
+		return nil, fmt.Errorf("openai compat executor: parse upstream url: %w", err)
+	}
+	query := cloneValues(opts.Query)
+	query = mergeQueryValues(query, extraQuery)
+	if len(query) > 0 {
+		parsedURL.RawQuery = query.Encode()
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, parsedURL.String(), bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	httpReq.Header = mergeForwardHeaders(httpReq.Header, opts.Headers, "Authorization", "Content-Type", "User-Agent", "Accept", "Cache-Control")
+	httpReq.Header = mergeForwardHeaders(httpReq.Header, extraHeaders, "Authorization", "Content-Type", "User-Agent", "Accept", "Cache-Control")
 	e.prepareUpstreamRequest(httpReq, auth, apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
@@ -257,7 +469,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
+		URL:       parsedURL.String(),
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
 		Body:      translated,

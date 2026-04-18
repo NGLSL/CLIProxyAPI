@@ -10,6 +10,52 @@ import (
 	"golang.org/x/net/context"
 )
 
+func TestRequestForwardOptions_ClonesHeadersAndFiltersInternalAltQuery(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	req, err := http.NewRequest(http.MethodPost, "/v1/chat/completions?foo=bar&alt=sse&$alt=json", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	req.Header.Set("X-Test", "client-value")
+	ginCtx.Request = req
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	headers, query := requestForwardOptions(ctx)
+	if got := headers.Get("X-Test"); got != "client-value" {
+		t.Fatalf("forward header = %q, want %q", got, "client-value")
+	}
+	if got := query.Get("foo"); got != "bar" {
+		t.Fatalf("forward query foo = %q, want %q", got, "bar")
+	}
+	if got := query.Get("alt"); got != "" {
+		t.Fatalf("forward query alt = %q, want empty", got)
+	}
+	if got := query.Get("$alt"); got != "" {
+		t.Fatalf("forward query $alt = %q, want empty", got)
+	}
+
+	headers.Set("X-Test", "mutated")
+	query.Set("foo", "changed")
+	if got := ginCtx.Request.Header.Get("X-Test"); got != "client-value" {
+		t.Fatalf("original header mutated to %q", got)
+	}
+	if got := ginCtx.Request.URL.Query().Get("foo"); got != "bar" {
+		t.Fatalf("original query mutated to %q", got)
+	}
+}
+
+func TestRequestForwardOptions_ReturnsNilWithoutGinRequest(t *testing.T) {
+	headers, query := requestForwardOptions(context.Background())
+	if headers != nil {
+		t.Fatalf("headers = %#v, want nil", headers)
+	}
+	if query != nil {
+		t.Fatalf("query = %#v, want nil", query)
+	}
+}
+
 func TestRequestExecutionMetadata_IncludesStickyRouteKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -215,6 +216,44 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
 	return meta
+}
+
+func requestForwardHeaders(ctx context.Context) http.Header {
+	if ctx == nil {
+		return nil
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return nil
+	}
+	if ginCtx.Request.Header == nil {
+		return nil
+	}
+	return ginCtx.Request.Header.Clone()
+}
+
+func requestForwardQuery(ctx context.Context) url.Values {
+	if ctx == nil {
+		return nil
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil || ginCtx.Request.URL == nil {
+		return nil
+	}
+	if ginCtx.Request.URL.RawQuery == "" {
+		return nil
+	}
+	query := ginCtx.Request.URL.Query()
+	query.Del("alt")
+	query.Del("$alt")
+	if len(query) == 0 {
+		return nil
+	}
+	return query
+}
+
+func requestForwardOptions(ctx context.Context) (http.Header, url.Values) {
+	return requestForwardHeaders(ctx), requestForwardQuery(ctx)
 }
 
 func stickyRouteKeyFromGinContext(ginCtx *gin.Context) string {
@@ -499,6 +538,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	forwardHeaders, forwardQuery := requestForwardOptions(ctx)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -510,6 +550,8 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
+		Headers:         forwardHeaders,
+		Query:           forwardQuery,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
@@ -546,6 +588,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	forwardHeaders, forwardQuery := requestForwardOptions(ctx)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -557,6 +600,8 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
+		Headers:         forwardHeaders,
+		Query:           forwardQuery,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
@@ -597,6 +642,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	forwardHeaders, forwardQuery := requestForwardOptions(ctx)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -608,6 +654,8 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	opts := coreexecutor.Options{
 		Stream:          true,
 		Alt:             alt,
+		Headers:         forwardHeaders,
+		Query:           forwardQuery,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
