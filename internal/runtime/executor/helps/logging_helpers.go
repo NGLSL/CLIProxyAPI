@@ -276,6 +276,9 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	if attempt.bodyStarted && !attempt.bodyHasContent {
 		attempt.bodyStarted = false
 	}
+	if attempt.bodyHasContent && !strings.HasSuffix(attempt.response.String(), "\n") {
+		attempt.response.WriteString("\n")
+	}
 	if attempt.errorWritten {
 		attempt.response.WriteString("\n")
 	}

@@ -15,7 +15,7 @@ func TestAPIResponseAggregationSingleAttemptPreservesFormat(t *testing.T) {
 	t.Parallel()
 
 	ctx, ginCtx := newLoggingHelpersTestContext(t)
-	cfg := &config.Config{RequestLog: true}
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
 
 	RecordAPIRequest(ctx, cfg, UpstreamRequestLog{
 		URL:     "https://example.com/v1/messages",
@@ -48,7 +48,7 @@ func TestAPIResponseAggregationMultipleAttemptsPreservesSeparator(t *testing.T) 
 	t.Parallel()
 
 	ctx, ginCtx := newLoggingHelpersTestContext(t)
-	cfg := &config.Config{RequestLog: true}
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
 
 	RecordAPIRequest(ctx, cfg, UpstreamRequestLog{URL: "https://example.com/1", Method: http.MethodPost})
 	RecordAPIResponseMetadata(ctx, cfg, http.StatusBadGateway, http.Header{"X-Attempt": {"1"}})
@@ -72,7 +72,7 @@ func TestAPIResponseAggregationAppendsErrorsInOrder(t *testing.T) {
 	t.Parallel()
 
 	ctx, ginCtx := newLoggingHelpersTestContext(t)
-	cfg := &config.Config{RequestLog: true}
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
 
 	RecordAPIResponseMetadata(ctx, cfg, http.StatusBadRequest, nil)
 	AppendAPIResponseChunk(ctx, cfg, []byte("partial-body"))
@@ -91,7 +91,7 @@ func TestAPIResponseAggregationSnapshotsRemainStableDuringSameAttempt(t *testing
 	t.Parallel()
 
 	ctx, ginCtx := newLoggingHelpersTestContext(t)
-	cfg := &config.Config{RequestLog: true}
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
 
 	RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, nil)
 	AppendAPIResponseChunk(ctx, cfg, []byte("chunk-one"))
