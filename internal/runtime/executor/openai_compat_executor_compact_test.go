@@ -309,6 +309,7 @@ func TestOpenAICompatExecutorExecutePassesThroughExtraFieldsAndRequestMetadata(t
 	payload := []byte(`{
 		"model":"gpt-4.1",
 		"messages":[{"role":"user","content":"hi"}],
+		"metadata":{"trace_id":"trace-123","tenant":"acme"},
 		"service_tier":"priority",
 		"extra_headers":{"X-Extra":"extra-value"},
 		"extra_query":{"provider":"openrouter","tags":["a","b"]},
@@ -358,5 +359,8 @@ func TestOpenAICompatExecutorExecutePassesThroughExtraFieldsAndRequestMetadata(t
 	}
 	if gjson.GetBytes(gotBody, "extra_body").Exists() {
 		t.Fatalf("extra_body unexpectedly present in upstream body")
+	}
+	if gjson.GetBytes(gotBody, "metadata").Exists() {
+		t.Fatalf("metadata unexpectedly present in upstream body")
 	}
 }

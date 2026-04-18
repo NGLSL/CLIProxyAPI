@@ -243,7 +243,7 @@ func stripOpenAICompatExtras(payload []byte) []byte {
 	if len(payload) == 0 {
 		return payload
 	}
-	for _, path := range []string{"extra_headers", "extra_query", "extra_body"} {
+	for _, path := range []string{"extra_headers", "extra_query", "extra_body", "metadata"} {
 		updated, errDelete := sjson.DeleteBytes(payload, path)
 		if errDelete != nil {
 			continue
