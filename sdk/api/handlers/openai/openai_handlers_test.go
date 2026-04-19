@@ -18,20 +18,30 @@ import (
 )
 
 type chatCaptureExecutor struct {
-	calls        int
-	sourceFormat string
+	calls          int
+	streamCalls    int
+	sourceFormat   string
+	payloads       [][]byte
+	streamPayloads [][]byte
 }
 
 func (e *chatCaptureExecutor) Identifier() string { return "test-provider" }
 
-func (e *chatCaptureExecutor) Execute(_ context.Context, _ *coreauth.Auth, _ coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *chatCaptureExecutor) Execute(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
 	e.calls++
 	e.sourceFormat = opts.SourceFormat.String()
+	e.payloads = append(e.payloads, append([]byte(nil), req.Payload...))
 	return coreexecutor.Response{Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1}}`)}, nil
 }
 
-func (e *chatCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
-	return nil, errors.New("not implemented")
+func (e *chatCaptureExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.streamCalls++
+	e.sourceFormat = opts.SourceFormat.String()
+	e.streamPayloads = append(e.streamPayloads, append([]byte(nil), req.Payload...))
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"test-model","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`)}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
 
 func (e *chatCaptureExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
@@ -66,6 +76,7 @@ func newOpenAIChatTestRouter(t *testing.T, executor *chatCaptureExecutor) http.H
 	h := NewOpenAIAPIHandler(base)
 	router := gin.New()
 	router.POST("/v1/chat/completions", h.ChatCompletions)
+	router.POST("/v1/completions", h.Completions)
 	return router
 }
 
@@ -130,7 +141,7 @@ func TestConvertCompletionsRequestToChatCompletionsPreservesCompatibleFields(t *
 		"extra_body":{"user":"abc"}
 	}`)
 
-	out := convertCompletionsRequestToChatCompletions(raw)
+	out := convertCompletionsRequestToChatCompletions(raw, true)
 
 	if got := gjson.GetBytes(out, "model").String(); got != "gpt-4.1" {
 		t.Fatalf("model = %q, want %q", got, "gpt-4.1")
@@ -206,5 +217,65 @@ func TestShouldRejectResponsesFormat(t *testing.T) {
 				t.Fatalf("shouldRejectResponsesFormat() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestChatCompletionsStreamingDropsMetadata(t *testing.T) {
+	executor := &chatCaptureExecutor{}
+	router := newOpenAIChatTestRouter(t, executor)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model","stream":true,"messages":[{"role":"user","content":"hello"}],"metadata":{"source":"explicit"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if executor.streamCalls != 1 {
+		t.Fatalf("stream calls = %d, want 1", executor.streamCalls)
+	}
+	if gjson.GetBytes(executor.streamPayloads[0], "metadata").Exists() {
+		t.Fatalf("metadata leaked into chat streaming payload: %s", executor.streamPayloads[0])
+	}
+}
+
+func TestCompletionsNonStreamingPreservesMetadata(t *testing.T) {
+	executor := &chatCaptureExecutor{}
+	router := newOpenAIChatTestRouter(t, executor)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(`{"model":"test-model","prompt":"hello","metadata":{"source":"explicit"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
+	}
+	if got := gjson.GetBytes(executor.payloads[0], "metadata.source").String(); got != "explicit" {
+		t.Fatalf("metadata.source = %q, want %q; payload=%s", got, "explicit", executor.payloads[0])
+	}
+}
+
+func TestCompletionsStreamingDropsMetadata(t *testing.T) {
+	executor := &chatCaptureExecutor{}
+	router := newOpenAIChatTestRouter(t, executor)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(`{"model":"test-model","prompt":"hello","stream":true,"metadata":{"source":"explicit"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if executor.streamCalls != 1 {
+		t.Fatalf("stream calls = %d, want 1", executor.streamCalls)
+	}
+	if gjson.GetBytes(executor.streamPayloads[0], "metadata").Exists() {
+		t.Fatalf("metadata leaked into completions streaming payload: %s", executor.streamPayloads[0])
 	}
 }

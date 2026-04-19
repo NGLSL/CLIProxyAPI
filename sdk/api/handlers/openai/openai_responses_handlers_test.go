@@ -32,8 +32,13 @@ func (e *responsesCaptureExecutor) Execute(_ context.Context, _ *coreauth.Auth, 
 	return coreexecutor.Response{Payload: []byte(`{"id":"resp_1","object":"response","output":[]}`)}, nil
 }
 
-func (e *responsesCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
-	return nil, errors.New("not implemented")
+func (e *responsesCaptureExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.sourceFormat = opts.SourceFormat.String()
+	e.payloads = append(e.payloads, append([]byte(nil), req.Payload...))
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n")}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
 
 func (e *responsesCaptureExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
@@ -128,6 +133,29 @@ func TestResponsesUsesClientMetadataAlias(t *testing.T) {
 	}
 	if gjson.GetBytes(executor.payloads[0], "client_metadata").Exists() {
 		t.Fatalf("client_metadata leaked into executor payload: %s", executor.payloads[0])
+	}
+}
+
+func TestResponsesStreamingDropsClientMetadata(t *testing.T) {
+	executor := &responsesCaptureExecutor{}
+	router := newOpenAIResponsesTestRouter(t, executor)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","stream":true,"input":"hello","client_metadata":{"source":"codex"},"metadata":{"source":"explicit"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if len(executor.payloads) != 1 {
+		t.Fatalf("streaming executor payloads = %d, want 1", len(executor.payloads))
+	}
+	if gjson.GetBytes(executor.payloads[0], "metadata").Exists() {
+		t.Fatalf("metadata leaked into streaming executor payload: %s", executor.payloads[0])
+	}
+	if gjson.GetBytes(executor.payloads[0], "client_metadata").Exists() {
+		t.Fatalf("client_metadata leaked into streaming executor payload: %s", executor.payloads[0])
 	}
 }
 

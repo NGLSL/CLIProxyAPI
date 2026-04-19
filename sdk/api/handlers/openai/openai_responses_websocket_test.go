@@ -200,15 +200,15 @@ func TestNormalizeResponsesWebsocketRequestCreate(t *testing.T) {
 	}
 }
 
-func TestNormalizeResponsesWebsocketRequestUsesClientMetadataAlias(t *testing.T) {
+func TestNormalizeResponsesWebsocketRequestDropsClientMetadata(t *testing.T) {
 	raw := []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}],"client_metadata":{"source":"codex"}}`)
 
 	normalized, last, errMsg := normalizeResponsesWebsocketRequest(raw, nil, nil)
 	if errMsg != nil {
 		t.Fatalf("unexpected error: %v", errMsg.Error)
 	}
-	if got := gjson.GetBytes(normalized, "metadata.source").String(); got != "codex" {
-		t.Fatalf("metadata.source = %q, want %q; normalized=%s", got, "codex", normalized)
+	if gjson.GetBytes(normalized, "metadata").Exists() {
+		t.Fatalf("metadata leaked into normalized request: %s", normalized)
 	}
 	if gjson.GetBytes(normalized, "client_metadata").Exists() {
 		t.Fatalf("client_metadata leaked into normalized request: %s", normalized)
@@ -1013,8 +1013,8 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	if gjson.GetBytes(forwarded, "model").String() != "test-model" {
 		t.Fatalf("forwarded model = %s, want test-model", gjson.GetBytes(forwarded, "model").String())
 	}
-	if got := gjson.GetBytes(forwarded, "metadata.source").String(); got != "codex" {
-		t.Fatalf("forwarded metadata.source = %q, want %q; payload=%s", got, "codex", forwarded)
+	if gjson.GetBytes(forwarded, "metadata").Exists() {
+		t.Fatalf("metadata leaked upstream: %s", forwarded)
 	}
 	if gjson.GetBytes(forwarded, "client_metadata").Exists() {
 		t.Fatalf("client_metadata leaked upstream: %s", forwarded)

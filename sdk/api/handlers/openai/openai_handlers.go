@@ -111,6 +111,9 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	stream := streamResult.Type == gjson.True
+	if stream {
+		rawJSON = dropTopLevelMetadata(rawJSON)
+	}
 
 	if shouldRejectResponsesFormat(rawJSON) {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -167,6 +170,17 @@ func copyRawJSONFieldsIfExists(dst []byte, root gjson.Result, fields ...string) 
 	return dst
 }
 
+func dropTopLevelMetadata(rawJSON []byte) []byte {
+	if !gjson.GetBytes(rawJSON, "metadata").Exists() {
+		return rawJSON
+	}
+	updated, err := sjson.DeleteBytes(rawJSON, "metadata")
+	if err != nil {
+		return rawJSON
+	}
+	return updated
+}
+
 // Completions handles the /v1/completions endpoint.
 // It determines whether the request is for a streaming or non-streaming response
 // and calls the appropriate handler based on the model provider.
@@ -205,7 +219,7 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 //
 // Returns:
 //   - []byte: The converted chat completions request
-func convertCompletionsRequestToChatCompletions(rawJSON []byte) []byte {
+func convertCompletionsRequestToChatCompletions(rawJSON []byte, preserveMetadata bool) []byte {
 	root := gjson.ParseBytes(rawJSON)
 
 	// Extract prompt from completions request
@@ -266,8 +280,7 @@ func convertCompletionsRequestToChatCompletions(rawJSON []byte) []byte {
 		out, _ = sjson.SetBytes(out, "echo", echo.Bool())
 	}
 
-	out = copyRawJSONFieldsIfExists(out, root,
-		"metadata",
+	fields := []string{
 		"service_tier",
 		"store",
 		"seed",
@@ -281,8 +294,11 @@ func convertCompletionsRequestToChatCompletions(rawJSON []byte) []byte {
 		"extra_headers",
 		"extra_query",
 		"extra_body",
-	)
-
+	}
+	if preserveMetadata {
+		fields = append([]string{"metadata"}, fields...)
+	}
+	out = copyRawJSONFieldsIfExists(out, root, fields...)
 	return out
 }
 
@@ -580,7 +596,7 @@ func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context,
 	c.Header("Content-Type", "application/json")
 
 	// Convert completions request to chat completions format
-	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON)
+	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON, true)
 
 	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
@@ -619,7 +635,7 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 	}
 
 	// Convert completions request to chat completions format
-	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON)
+	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON, false)
 
 	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())

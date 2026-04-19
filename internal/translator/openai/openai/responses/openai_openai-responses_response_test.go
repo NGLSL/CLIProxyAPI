@@ -590,6 +590,38 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Preserve
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_ReasoningItemUsesContentOnly(t *testing.T) {
+	originalRequest := []byte(`{"model":"gpt-4.1","reasoning":{"effort":"high","summary":"auto"}}`)
+	request := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-4.1", originalRequest, false)
+	response := []byte(`{
+		"id":"chatcmpl-reasoning",
+		"object":"chat.completion",
+		"created":1773896263,
+		"model":"gpt-4.1",
+		"choices":[{
+			"index":0,
+			"message":{"role":"assistant","content":"hello","reasoning_content":"step-1"},
+			"finish_reason":"stop"
+		}],
+		"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
+	}`)
+
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-4.1", originalRequest, request, response, nil)
+
+	if got := gjson.GetBytes(out, "output.0.type").String(); got != "reasoning" {
+		t.Fatalf("output.0.type = %q, want %q", got, "reasoning")
+	}
+	if got := gjson.GetBytes(out, "output.0.content.0.text").String(); got != "step-1" {
+		t.Fatalf("output.0.content.0.text = %q, want %q", got, "step-1")
+	}
+	if got := gjson.GetBytes(out, "output.0.summary.#").Int(); got != 0 {
+		t.Fatalf("output.0.summary length = %d, want 0", got)
+	}
+	if got := gjson.GetBytes(out, "output.1.type").String(); got != "message" {
+		t.Fatalf("output.1.type = %q, want %q", got, "message")
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_EmitsReasoningTextDelta(t *testing.T) {
 	in := []string{
 		`data: {"id":"resp_reasoning","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":"step-1","tool_calls":null},"finish_reason":null}]}`,
@@ -599,23 +631,44 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_EmitsReasoningTex
 
 	var param any
 	var sawDelta bool
+	var sawSummaryDelta bool
+	var completed gjson.Result
 	for _, line := range in {
 		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
 			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
-			if event != "response.reasoning_text.delta" {
-				continue
-			}
-			sawDelta = true
-			if got := data.Get("delta").String(); got != "step-1" {
-				t.Fatalf("delta = %q, want %q", got, "step-1")
-			}
-			if got := data.Get("content_index").Int(); got != 0 {
-				t.Fatalf("content_index = %d, want 0", got)
+			switch event {
+			case "response.reasoning_text.delta":
+				sawDelta = true
+				if got := data.Get("delta").String(); got != "step-1" {
+					t.Fatalf("delta = %q, want %q", got, "step-1")
+				}
+				if got := data.Get("content_index").Int(); got != 0 {
+					t.Fatalf("content_index = %d, want 0", got)
+				}
+			case "response.reasoning_summary_text.delta":
+				sawSummaryDelta = true
+			case "response.completed":
+				completed = data.Get("response")
 			}
 		}
 	}
 	if !sawDelta {
 		t.Fatal("expected response.reasoning_text.delta event")
+	}
+	if sawSummaryDelta {
+		t.Fatal("did not expect response.reasoning_summary_text.delta event")
+	}
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+	if got := completed.Get("output.0.type").String(); got != "reasoning" {
+		t.Fatalf("output.0.type = %q, want %q", got, "reasoning")
+	}
+	if got := completed.Get("output.0.content.0.text").String(); got != "step-1" {
+		t.Fatalf("output.0.content.0.text = %q, want %q", got, "step-1")
+	}
+	if got := completed.Get("output.0.summary.#").Int(); got != 0 {
+		t.Fatalf("output.0.summary length = %d, want 0", got)
 	}
 }
 

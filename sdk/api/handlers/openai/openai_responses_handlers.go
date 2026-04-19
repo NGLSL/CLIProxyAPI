@@ -463,7 +463,7 @@ func (h *OpenAIResponsesAPIHandler) HandlerType() string {
 	return OpenaiResponse
 }
 
-func normalizeResponsesClientMetadata(rawJSON []byte) ([]byte, *interfaces.ErrorMessage) {
+func normalizeResponsesClientMetadata(rawJSON []byte, preserveClientMetadata bool) ([]byte, *interfaces.ErrorMessage) {
 	normalized := rawJSON
 	if gjson.GetBytes(normalized, "metadata").Exists() {
 		if updated, errDelete := sjson.DeleteBytes(normalized, "metadata"); errDelete == nil {
@@ -473,6 +473,12 @@ func normalizeResponsesClientMetadata(rawJSON []byte) ([]byte, *interfaces.Error
 
 	clientMetadata := gjson.GetBytes(normalized, "client_metadata")
 	if !clientMetadata.Exists() {
+		return normalized, nil
+	}
+	if !preserveClientMetadata {
+		if updated, errDelete := sjson.DeleteBytes(normalized, "client_metadata"); errDelete == nil {
+			normalized = updated
+		}
 		return normalized, nil
 	}
 
@@ -669,7 +675,9 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		return
 	}
 
-	normalizedJSON, errMsg := normalizeResponsesClientMetadata(rawJSON)
+	streamResult := gjson.GetBytes(rawJSON, "stream")
+	preserveClientMetadata := streamResult.Type != gjson.True
+	normalizedJSON, errMsg := normalizeResponsesClientMetadata(rawJSON, preserveClientMetadata)
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		return
@@ -677,7 +685,7 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 	rawJSON = normalizedJSON
 
 	// Check if the client requested a streaming response.
-	streamResult := gjson.GetBytes(rawJSON, "stream")
+	streamResult = gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
 		h.handleStreamingResponse(c, rawJSON)
 	} else {
@@ -698,7 +706,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		return
 	}
 
-	normalizedJSON, errMsg := normalizeResponsesClientMetadata(rawJSON)
+	normalizedJSON, errMsg := normalizeResponsesClientMetadata(rawJSON, true)
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		return

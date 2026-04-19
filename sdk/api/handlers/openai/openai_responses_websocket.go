@@ -234,7 +234,7 @@ func normalizeResponsesWebsocketRequest(rawJSON []byte, lastRequest []byte, last
 }
 
 func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, allowIncrementalInputWithPreviousResponseID bool) ([]byte, []byte, *interfaces.ErrorMessage) {
-	normalizedJSON, errMsg := normalizeResponsesClientMetadata(rawJSON)
+	normalizedJSON, errMsg := normalizeResponsesClientMetadata(rawJSON, false)
 	if errMsg != nil {
 		return nil, lastRequest, errMsg
 	}
