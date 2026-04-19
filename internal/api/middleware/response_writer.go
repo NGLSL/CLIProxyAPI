@@ -11,6 +11,7 @@ import (
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
+	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	"github.com/gin-gonic/gin"
 )
 
@@ -43,6 +44,7 @@ type ResponseWriterWrapper struct {
 	streamDone            chan struct{}              // streamDone signals when the streaming goroutine completes.
 	logger                logging.RequestLogger      // logger is the instance of the request logger service.
 	requestInfo           *RequestInfo               // requestInfo holds the details of the original request.
+	ginContext            *gin.Context               // ginContext provides per-request metrics state for usage aggregation.
 	statusCode            int                        // statusCode stores the HTTP status code of the response.
 	headers               map[string][]string        // headers stores the response headers.
 	logOnErrorOnly        bool                       // logOnErrorOnly enables logging only when an error response is detected.
@@ -79,24 +81,29 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 	// Ensure headers are captured before first write
 	// This is critical because Write() may trigger WriteHeader() internally
 	w.ensureHeadersCaptured()
+	w.prepareStreamingIfNeeded()
 
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.Write(data)
 
 	// THEN: Handle logging based on response type
-	if w.isStreaming && w.chunkChannel != nil {
+	if w.isStreaming {
+		internalusage.ObserveResponseWrite(w.ginContext, int64(n), true)
 		// Capture TTFB on first chunk (synchronous, before async channel send)
 		if w.firstChunkTimestamp.IsZero() {
 			w.firstChunkTimestamp = time.Now()
 		}
-		// For streaming responses: Send to async logging channel (non-blocking)
-		select {
-		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
-		default: // Channel full, skip logging to avoid blocking
+		if w.chunkChannel != nil {
+			// For streaming responses: Send to async logging channel (non-blocking)
+			select {
+			case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
+			default: // Channel full, skip logging to avoid blocking
+			}
 		}
 		return n, err
 	}
 
+	internalusage.ObserveResponseWrite(w.ginContext, int64(n), false)
 	if w.shouldBufferResponseBody() {
 		w.appendResponseBodyForLogging(data)
 	}
@@ -216,23 +223,28 @@ func (w *ResponseWriterWrapper) currentResponseBodyForLogging() []byte {
 // bypass Write() and would be missing from request logs.
 func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 	w.ensureHeadersCaptured()
+	w.prepareStreamingIfNeeded()
 
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.WriteString(data)
 
 	// THEN: Capture for logging
-	if w.isStreaming && w.chunkChannel != nil {
+	if w.isStreaming {
+		internalusage.ObserveResponseWrite(w.ginContext, int64(n), true)
 		// Capture TTFB on first chunk (synchronous, before async channel send)
 		if w.firstChunkTimestamp.IsZero() {
 			w.firstChunkTimestamp = time.Now()
 		}
-		select {
-		case w.chunkChannel <- []byte(data):
-		default:
+		if w.chunkChannel != nil {
+			select {
+			case w.chunkChannel <- []byte(data):
+			default:
+			}
 		}
 		return n, err
 	}
 
+	internalusage.ObserveResponseWrite(w.ginContext, int64(n), false)
 	if w.shouldBufferResponseBody() {
 		w.appendResponseStringForLogging(data)
 	}
@@ -251,29 +263,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 	// Detect streaming based on Content-Type
 	contentType := w.ResponseWriter.Header().Get("Content-Type")
 	w.isStreaming = w.detectStreaming(contentType)
-
-	// If streaming, initialize streaming log writer
-	if w.isStreaming && w.logger.IsEnabled() {
-		streamWriter, err := w.logger.LogStreamingRequest(
-			w.requestInfo.URL,
-			w.requestInfo.Method,
-			w.requestInfo.Headers,
-			w.requestInfo.Body,
-			w.requestInfo.RequestID,
-		)
-		if err == nil {
-			w.streamWriter = streamWriter
-			w.chunkChannel = make(chan []byte, 100) // Buffered channel for async writes
-			doneChan := make(chan struct{})
-			w.streamDone = doneChan
-
-			// Start async chunk processor
-			go w.processStreamingChunks(doneChan)
-
-			// Write status immediately
-			_ = streamWriter.WriteStatus(statusCode, w.headers)
-		}
-	}
+	w.startStreamingLogging()
 
 	// Call original WriteHeader
 	w.ResponseWriter.WriteHeader(statusCode)
@@ -285,6 +275,46 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 func (w *ResponseWriterWrapper) ensureHeadersCaptured() {
 	// Always capture the current headers to ensure we have the latest state
 	w.captureCurrentHeaders()
+}
+
+func (w *ResponseWriterWrapper) prepareStreamingIfNeeded() {
+	if w == nil {
+		return
+	}
+	if w.isStreaming {
+		return
+	}
+	contentType := w.ResponseWriter.Header().Get("Content-Type")
+	if !w.detectStreaming(contentType) {
+		return
+	}
+	w.isStreaming = true
+	w.startStreamingLogging()
+}
+
+func (w *ResponseWriterWrapper) startStreamingLogging() {
+	if w == nil || !w.isStreaming || w.chunkChannel != nil || w.streamWriter != nil {
+		return
+	}
+	if w.logger == nil || !w.logger.IsEnabled() || w.requestInfo == nil {
+		return
+	}
+	streamWriter, err := w.logger.LogStreamingRequest(
+		w.requestInfo.URL,
+		w.requestInfo.Method,
+		w.requestInfo.Headers,
+		w.requestInfo.Body,
+		w.requestInfo.RequestID,
+	)
+	if err != nil {
+		return
+	}
+	w.streamWriter = streamWriter
+	w.chunkChannel = make(chan []byte, 100)
+	doneChan := make(chan struct{})
+	w.streamDone = doneChan
+	go w.processStreamingChunks(doneChan)
+	_ = streamWriter.WriteStatus(w.currentStatusCodeForBuffering(), w.headers)
 }
 
 // captureCurrentHeaders reads all headers from the underlying ResponseWriter and stores them

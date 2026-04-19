@@ -20,6 +20,9 @@ type Record struct {
 	Latency          time.Duration
 	FirstByteLatency time.Duration
 	Failed           bool
+	ChunkCount       int64
+	ResponseBytes    int64
+	APIResponseBytes int64
 	Detail           Detail
 }
 

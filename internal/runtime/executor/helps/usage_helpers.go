@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/gin-gonic/gin"
@@ -91,6 +92,7 @@ func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, fa
 	if r == nil {
 		return usage.Record{Detail: detail, Failed: failed}
 	}
+	metrics := internalusage.SnapshotRequestMetrics(ctx)
 	return usage.Record{
 		Provider:         r.provider,
 		Model:            r.model,
@@ -102,6 +104,9 @@ func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, fa
 		Latency:          r.latency(),
 		FirstByteLatency: r.firstByteLatency(ctx),
 		Failed:           failed,
+		ChunkCount:       metrics.ChunkCount,
+		ResponseBytes:    metrics.ResponseBytes,
+		APIResponseBytes: metrics.APIResponseBytes,
 		Detail:           detail,
 	}
 }

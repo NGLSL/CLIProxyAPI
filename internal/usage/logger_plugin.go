@@ -96,6 +96,9 @@ type RequestDetail struct {
 	Timestamp          time.Time  `json:"timestamp"`
 	LatencyMs          int64      `json:"latency_ms"`
 	FirstByteLatencyMs *int64     `json:"first_byte_latency_ms,omitempty"`
+	ChunkCount         int64      `json:"chunk_count"`
+	ResponseBytes      int64      `json:"response_bytes"`
+	APIResponseBytes   int64      `json:"api_response_bytes"`
 	Source             string     `json:"source"`
 	AuthIndex          string     `json:"auth_index"`
 	Tokens             TokenStats `json:"tokens"`
@@ -228,6 +231,9 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		Timestamp:          timestamp,
 		LatencyMs:          normaliseLatency(record.Latency),
 		FirstByteLatencyMs: normaliseOptionalLatency(record.FirstByteLatency),
+		ChunkCount:         normaliseNonNegative(record.ChunkCount),
+		ResponseBytes:      normaliseNonNegative(record.ResponseBytes),
+		APIResponseBytes:   normaliseNonNegative(record.APIResponseBytes),
 		Source:             record.Source,
 		AuthIndex:          record.AuthIndex,
 		Tokens:             detail,
@@ -368,6 +374,9 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				if detail.LatencyMs < 0 {
 					detail.LatencyMs = 0
 				}
+				detail.ChunkCount = normaliseNonNegative(detail.ChunkCount)
+				detail.ResponseBytes = normaliseNonNegative(detail.ResponseBytes)
+				detail.APIResponseBytes = normaliseNonNegative(detail.APIResponseBytes)
 				if detail.Timestamp.IsZero() {
 					detail.Timestamp = time.Now()
 				}
@@ -512,6 +521,87 @@ func normaliseOptionalLatency(latency time.Duration) *int64 {
 	}
 	value := latency.Milliseconds()
 	return &value
+}
+
+func normaliseNonNegative(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+const requestMetricsContextKey = "USAGE_REQUEST_METRICS"
+
+type RequestMetrics struct {
+	ChunkCount       int64
+	ResponseBytes    int64
+	APIResponseBytes int64
+}
+
+type requestMetricsState struct {
+	chunkCount       atomic.Int64
+	responseBytes    atomic.Int64
+	apiResponseBytes atomic.Int64
+}
+
+func EnsureRequestMetrics(ginCtx *gin.Context) {
+	_ = requestMetricsStateFromGin(ginCtx)
+}
+
+func ObserveResponseWrite(ginCtx *gin.Context, bytesWritten int64, streaming bool) {
+	if ginCtx == nil || bytesWritten <= 0 {
+		return
+	}
+	state := requestMetricsStateFromGin(ginCtx)
+	state.responseBytes.Add(bytesWritten)
+	if streaming {
+		state.chunkCount.Add(1)
+	}
+}
+
+func ObserveAPIResponseChunk(ginCtx *gin.Context, bytesWritten int64) {
+	if ginCtx == nil || bytesWritten <= 0 {
+		return
+	}
+	state := requestMetricsStateFromGin(ginCtx)
+	state.apiResponseBytes.Add(bytesWritten)
+}
+
+func SnapshotRequestMetrics(ctx context.Context) RequestMetrics {
+	if ctx == nil {
+		return RequestMetrics{}
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return RequestMetrics{}
+	}
+	return SnapshotRequestMetricsFromGin(ginCtx)
+}
+
+func SnapshotRequestMetricsFromGin(ginCtx *gin.Context) RequestMetrics {
+	state := requestMetricsStateFromGin(ginCtx)
+	if state == nil {
+		return RequestMetrics{}
+	}
+	return RequestMetrics{
+		ChunkCount:       state.chunkCount.Load(),
+		ResponseBytes:    state.responseBytes.Load(),
+		APIResponseBytes: state.apiResponseBytes.Load(),
+	}
+}
+
+func requestMetricsStateFromGin(ginCtx *gin.Context) *requestMetricsState {
+	if ginCtx == nil {
+		return nil
+	}
+	if value, exists := ginCtx.Get(requestMetricsContextKey); exists {
+		if state, ok := value.(*requestMetricsState); ok && state != nil {
+			return state
+		}
+	}
+	state := &requestMetricsState{}
+	ginCtx.Set(requestMetricsContextKey, state)
+	return state
 }
 
 func formatHour(hour int) string {

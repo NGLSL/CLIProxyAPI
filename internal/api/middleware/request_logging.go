@@ -12,12 +12,28 @@ import (
 	"time"
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
+	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
 	"github.com/gin-gonic/gin"
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
 const requestLogBodyPrefixLimit = nonStreamingSuccessResponseLogBodyLimit
+
+// UsageMetricsMiddleware installs a lightweight response wrapper used only for
+// request-scoped usage aggregation. It keeps downstream byte and chunk metrics
+// available even when request logging middleware is not mounted.
+func UsageMetricsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		internalusage.EnsureRequestMetrics(c)
+		if _, ok := c.Writer.(*ResponseWriterWrapper); !ok {
+			wrapper := NewResponseWriterWrapper(c.Writer, nil, nil)
+			wrapper.ginContext = c
+			c.Writer = wrapper
+		}
+		c.Next()
+	}
+}
 
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
 // It captures detailed information about the request and response, including headers and body,
@@ -53,7 +69,9 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 
 		// Create response writer wrapper
+		internalusage.EnsureRequestMetrics(c)
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
+		wrapper.ginContext = c
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
 		}

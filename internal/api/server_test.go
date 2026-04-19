@@ -15,6 +15,7 @@ import (
 	internallogging "github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/NGLSL/CLIProxyAPI/v6/sdk/access"
+	"github.com/NGLSL/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
 	gin "github.com/gin-gonic/gin"
@@ -223,6 +224,50 @@ func TestServerRegistersProtectedOpenAIRoutes(t *testing.T) {
 				t.Fatalf("unexpected status code for %s: got %d want %d; body=%s", tc.path, rr.Code, http.StatusUnauthorized, rr.Body.String())
 			}
 		})
+	}
+}
+
+func TestUsageMetricsMiddlewareTracksStreamingWritesInCommercialMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: proxyconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		Port:                   0,
+		AuthDir:                t.TempDir(),
+		UsageStatisticsEnabled: true,
+		CommercialMode:         true,
+	}
+
+	authManager := auth.NewManager(nil, nil, nil)
+	accessManager := sdkaccess.NewManager()
+	var metrics usage.RequestMetrics
+
+	server := NewServer(cfg, authManager, accessManager, filepath.Join(t.TempDir(), "config.yaml"), WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, _ *proxyconfig.Config) {
+		engine.GET("/test-stream", func(c *gin.Context) {
+			c.Header("Content-Type", "text/event-stream")
+			_, _ = c.Writer.Write([]byte("data: hello\n\n"))
+			_, _ = c.Writer.Write([]byte("data: world\n\n"))
+			metrics = usage.SnapshotRequestMetricsFromGin(c)
+		})
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/test-stream", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if metrics.ChunkCount != 2 {
+		t.Fatalf("chunk count = %d, want 2", metrics.ChunkCount)
+	}
+	if metrics.ResponseBytes != int64(len("data: hello\n\n")+len("data: world\n\n")) {
+		t.Fatalf("response bytes = %d, want %d", metrics.ResponseBytes, len("data: hello\n\n")+len("data: world\n\n"))
+	}
+	if metrics.APIResponseBytes != 0 {
+		t.Fatalf("api response bytes = %d, want 0", metrics.APIResponseBytes)
 	}
 }
 

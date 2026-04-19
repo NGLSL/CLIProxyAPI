@@ -8,6 +8,7 @@ import (
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
+	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	"github.com/gin-gonic/gin"
 )
 
@@ -487,6 +488,34 @@ func repeatBytes(ch byte, size int) []byte {
 
 func repeatString(ch byte, size int) string {
 	return string(repeatBytes(ch, size))
+}
+
+func TestWriteTracksStreamingUsageWithoutLogger(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	wrapper := NewResponseWriterWrapper(c.Writer, nil, &RequestInfo{Body: []byte(`{"stream":true}`)})
+	wrapper.ginContext = c
+	c.Writer = wrapper
+	c.Header("Content-Type", "text/event-stream")
+
+	if _, err := wrapper.Write([]byte("data: hello\n\n")); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	if _, err := wrapper.WriteString("data: world\n\n"); err != nil {
+		t.Fatalf("WriteString error: %v", err)
+	}
+
+	metrics := internalusage.SnapshotRequestMetricsFromGin(c)
+	if metrics.ChunkCount != 2 {
+		t.Fatalf("chunk count = %d, want 2", metrics.ChunkCount)
+	}
+	if metrics.ResponseBytes != int64(len("data: hello\n\n")+len("data: world\n\n")) {
+		t.Fatalf("response bytes = %d, want %d", metrics.ResponseBytes, len("data: hello\n\n")+len("data: world\n\n"))
+	}
+	if wrapper.firstChunkTimestamp.IsZero() {
+		t.Fatal("firstChunkTimestamp was not set")
+	}
 }
 
 func requireFinalize(t *testing.T, wrapper *ResponseWriterWrapper, c *gin.Context) {

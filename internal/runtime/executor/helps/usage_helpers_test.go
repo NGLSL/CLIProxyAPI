@@ -6,7 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
+	coreusage "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/gin-gonic/gin"
 )
 
@@ -57,7 +58,7 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 		requestedAt: time.Now().Add(-1500 * time.Millisecond),
 	}
 
-	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(context.Background(), coreusage.Detail{TotalTokens: 3}, false)
 	if record.Latency < time.Second {
 		t.Fatalf("latency = %v, want >= 1s", record.Latency)
 	}
@@ -85,7 +86,7 @@ func TestUsageReporterBuildRecordIncludesFirstByteLatency(t *testing.T) {
 		requestedAt: requestedAt,
 	}
 
-	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(ctx, coreusage.Detail{TotalTokens: 3}, false)
 	if record.FirstByteLatency != 250*time.Millisecond {
 		t.Fatalf("first byte latency = %v, want 250ms", record.FirstByteLatency)
 	}
@@ -109,7 +110,7 @@ func TestUsageReporterBuildRecordPrefersAttemptFirstByteLatency(t *testing.T) {
 		requestedAt: requestedAt,
 	}
 
-	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(ctx, coreusage.Detail{TotalTokens: 3}, false)
 	if record.FirstByteLatency != 250*time.Millisecond {
 		t.Fatalf("first byte latency = %v, want 250ms", record.FirstByteLatency)
 	}
@@ -132,8 +133,37 @@ func TestUsageReporterBuildRecordDoesNotFallbackToGlobalTimestampAfterAttemptRes
 		requestedAt: requestedAt,
 	}
 
-	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(ctx, coreusage.Detail{TotalTokens: 3}, false)
 	if record.FirstByteLatency != 0 {
 		t.Fatalf("first byte latency = %v, want 0", record.FirstByteLatency)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesRequestMetrics(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	internalusage.EnsureRequestMetrics(ginCtx)
+	internalusage.ObserveResponseWrite(ginCtx, 12, true)
+	internalusage.ObserveResponseWrite(ginCtx, 8, true)
+	internalusage.ObserveAPIResponseChunk(ginCtx, 21)
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	reporter := &UsageReporter{
+		provider:    "openai",
+		model:       "gpt-5.4",
+		requestedAt: time.Now().Add(-time.Second),
+	}
+
+	record := reporter.buildRecord(ctx, coreusage.Detail{TotalTokens: 3}, false)
+	if record.ChunkCount != 2 {
+		t.Fatalf("chunk count = %d, want 2", record.ChunkCount)
+	}
+	if record.ResponseBytes != 20 {
+		t.Fatalf("response bytes = %d, want 20", record.ResponseBytes)
+	}
+	if record.APIResponseBytes != 21 {
+		t.Fatalf("api response bytes = %d, want 21", record.APIResponseBytes)
 	}
 }

@@ -12,7 +12,8 @@ import (
 	"time"
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
+	internallogging "github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
+	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -296,6 +297,7 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx != nil {
 		markAPIResponseTimestamp(ginCtx)
+		internalusage.ObserveAPIResponseChunk(ginCtx, int64(len(chunk)))
 	}
 	if cfg == nil || !cfg.RequestLog {
 		return
@@ -704,7 +706,7 @@ func LogWithRequestID(ctx context.Context) *log.Entry {
 	if ctx == nil {
 		return log.NewEntry(log.StandardLogger())
 	}
-	requestID := logging.GetRequestID(ctx)
+	requestID := internallogging.GetRequestID(ctx)
 	if requestID == "" {
 		return log.NewEntry(log.StandardLogger())
 	}

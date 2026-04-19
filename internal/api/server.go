@@ -230,6 +230,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 			}
 		}
 	}
+	if cfg.UsageStatisticsEnabled && (cfg.CommercialMode || requestLogger == nil) {
+		engine.Use(middleware.UsageMetricsMiddleware())
+	}
 
 	engine.Use(corsMiddleware())
 	wd, err := os.Getwd()

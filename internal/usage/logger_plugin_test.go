@@ -208,6 +208,41 @@ func TestRequestStatisticsRecordTrimsDetailsButKeepsAggregateTotals(t *testing.T
 	}
 }
 
+func TestRequestStatisticsMergeSnapshotNormalisesRequestMetricFields(t *testing.T) {
+	stats := NewRequestStatistics()
+	result := stats.MergeSnapshot(StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"import-key": {
+				Models: map[string]ModelSnapshot{
+					"gpt-5.4": {
+						Details: []RequestDetail{{
+							Timestamp:        time.Date(2026, 3, 22, 9, 0, 0, 0, time.UTC),
+							ChunkCount:       -1,
+							ResponseBytes:    -2,
+							APIResponseBytes: -3,
+							Tokens:           TokenStats{InputTokens: 1, TotalTokens: 1},
+						}},
+					},
+				},
+			},
+		},
+	})
+	if result.Added != 1 || result.Skipped != 0 {
+		t.Fatalf("merge result = %+v, want added=1 skipped=0", result)
+	}
+
+	detail := stats.Snapshot().APIs["import-key"].Models["gpt-5.4"].Details[0]
+	if detail.ChunkCount != 0 {
+		t.Fatalf("chunk_count = %d, want 0", detail.ChunkCount)
+	}
+	if detail.ResponseBytes != 0 {
+		t.Fatalf("response_bytes = %d, want 0", detail.ResponseBytes)
+	}
+	if detail.APIResponseBytes != 0 {
+		t.Fatalf("api_response_bytes = %d, want 0", detail.APIResponseBytes)
+	}
+}
+
 func TestRequestStatisticsMergeSnapshotTrimsDetailsButKeepsAggregateTotals(t *testing.T) {
 	stats := NewRequestStatistics()
 	baseTime := time.Date(2026, 3, 22, 9, 0, 0, 0, time.UTC)
