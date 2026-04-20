@@ -11,7 +11,7 @@ func TestManager_Update_PreservesModelStates(t *testing.T) {
 
 	model := "test-model"
 	backoffLevel := 7
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	nextRetryAfter := now.Add(10 * time.Minute)
 	nextRecoverAt := now.Add(20 * time.Minute)
 
@@ -173,7 +173,7 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 
 	model := "active-model"
 	backoffLevel := 3
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	nextRetryAfter := now.Add(5 * time.Minute)
 	nextRecoverAt := now.Add(15 * time.Minute)
 

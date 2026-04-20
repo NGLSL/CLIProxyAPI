@@ -12,7 +12,7 @@ func TestRuntimeSnapshotSaveAndLoadRoundTrip(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "runtime", "auth-state.json")
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	nextRetryAfter := now.Add(15 * time.Minute)
 	nextRecoverAt := now.Add(30 * time.Minute)
 
@@ -80,7 +80,7 @@ func TestRuntimeSnapshotSaveAndLoadRoundTrip(t *testing.T) {
 
 func TestManagerExportRuntimeSnapshotSkipsCleanAuths(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 
 	if _, err := manager.Register(context.Background(), &Auth{
 		ID:       "clean-auth",
@@ -115,7 +115,7 @@ func TestManagerExportRuntimeSnapshotSkipsCleanAuths(t *testing.T) {
 
 func TestManagerApplyRuntimeSnapshotClearsExpiredAuthLevelState(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 
 	if _, err := manager.Register(context.Background(), &Auth{
 		ID:       "auth-expired",
@@ -166,7 +166,7 @@ func TestManagerApplyRuntimeSnapshotClearsExpiredAuthLevelState(t *testing.T) {
 
 func TestManagerApplyRuntimeSnapshotPreservesFutureModelState(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	nextRetryAfter := now.Add(10 * time.Minute)
 	nextRecoverAt := now.Add(20 * time.Minute)
 
@@ -228,7 +228,7 @@ func TestManagerApplyRuntimeSnapshotPreservesFutureModelState(t *testing.T) {
 
 func TestManagerApplyRuntimeSnapshotDoesNotOverrideExistingRuntimeState(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	currentRetryAfter := now.Add(5 * time.Minute)
 	snapshotRetryAfter := now.Add(30 * time.Minute)
 
@@ -274,7 +274,7 @@ func TestManagerApplyRuntimeSnapshotDoesNotOverrideExistingRuntimeState(t *testi
 
 func TestManagerUpdatePreservesAuthLevelRuntimeState(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	nextRetryAfter := now.Add(10 * time.Minute)
 
 	if _, err := manager.Register(context.Background(), &Auth{

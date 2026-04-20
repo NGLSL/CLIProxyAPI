@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -113,21 +114,29 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	response, errExecute := h.executeAPICall(c.Request.Context(), body)
+	if errExecute != nil {
+		statusCode, message := apiCallHTTPError(errExecute)
+		c.JSON(statusCode, gin.H{"error": message})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+func (h *Handler) executeAPICall(ctx context.Context, body apiCallRequest) (apiCallResponse, error) {
 	method := strings.ToUpper(strings.TrimSpace(body.Method))
 	if method == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing method"})
-		return
+		return apiCallResponse{}, apiCallRequestError("missing method")
 	}
 
 	urlStr := strings.TrimSpace(body.URL)
 	if urlStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing url"})
-		return
+		return apiCallResponse{}, apiCallRequestError("missing url")
 	}
 	parsedURL, errParseURL := url.Parse(urlStr)
 	if errParseURL != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid url"})
-		return
+		return apiCallResponse{}, apiCallRequestError("invalid url")
 	}
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
@@ -147,16 +156,17 @@ func (h *Handler) APICall(c *gin.Context) {
 			continue
 		}
 		if !tokenResolved {
-			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), auth)
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			token, tokenErr = h.resolveTokenForAuth(ctx, auth)
 			tokenResolved = true
 		}
 		if auth != nil && token == "" {
 			if tokenErr != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "auth token refresh failed"})
-				return
+				return apiCallResponse{}, apiCallRequestError("auth token refresh failed")
 			}
-			c.JSON(http.StatusBadRequest, gin.H{"error": "auth token not found"})
-			return
+			return apiCallResponse{}, apiCallRequestError("auth token not found")
 		}
 		if token == "" {
 			continue
@@ -169,10 +179,12 @@ func (h *Handler) APICall(c *gin.Context) {
 		requestBody = strings.NewReader(body.Data)
 	}
 
-	req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, errNewRequest := http.NewRequestWithContext(ctx, method, urlStr, requestBody)
 	if errNewRequest != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to build request"})
-		return
+		return apiCallResponse{}, apiCallRequestError("failed to build request")
 	}
 
 	for key, value := range reqHeaders {
@@ -194,8 +206,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
-		return
+		return apiCallResponse{}, apiCallUpstreamError("request failed")
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
@@ -205,15 +216,39 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	respBody, errReadAll := io.ReadAll(resp.Body)
 	if errReadAll != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
-		return
+		return apiCallResponse{}, apiCallUpstreamError("failed to read response")
 	}
 
-	c.JSON(http.StatusOK, apiCallResponse{
+	return apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
-	})
+	}, nil
+}
+
+type apiCallError struct {
+	statusCode int
+	message    string
+}
+
+func (e apiCallError) Error() string {
+	return e.message
+}
+
+func apiCallRequestError(message string) error {
+	return apiCallError{statusCode: http.StatusBadRequest, message: message}
+}
+
+func apiCallUpstreamError(message string) error {
+	return apiCallError{statusCode: http.StatusBadGateway, message: message}
+}
+
+func apiCallHTTPError(err error) (int, string) {
+	var callErr apiCallError
+	if errors.As(err, &callErr) {
+		return callErr.statusCode, callErr.message
+	}
+	return http.StatusBadGateway, "request failed"
 }
 
 func firstNonEmptyString(values ...*string) string {

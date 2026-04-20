@@ -344,7 +344,7 @@ func TestServiceRunRestoresStoredAuthRuntimeSnapshotAndRegistersModels(t *testin
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	authDir := filepath.Join(tmpDir, "auth")
 	authID := "stored-auth"
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	nextRetryAfter := now.Add(10 * time.Minute)
 	nextRecoverAt := now.Add(20 * time.Minute)
 
@@ -420,7 +420,7 @@ func TestServiceRestoreWatcherSnapshotAuthsRestoresRuntimeSnapshotForWatcherAuth
 	}
 
 	authID := "watcher-auth"
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	nextRetryAfter := now.Add(10 * time.Minute)
 
 	t.Cleanup(func() {
@@ -466,7 +466,7 @@ func TestServiceReloadRestoreDoesNotOverrideFresherRuntimeState(t *testing.T) {
 	}
 
 	authID := "reload-auth"
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	currentRetryAfter := now.Add(5 * time.Minute)
 	snapshotRetryAfter := now.Add(30 * time.Minute)
 
@@ -517,7 +517,7 @@ func TestServiceShutdownPersistsAuthRuntimeSnapshot(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	authID := "shutdown-auth"
-	now := time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	nextRetryAfter := now.Add(10 * time.Minute)
 
 	service := &Service{

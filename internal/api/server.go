@@ -540,6 +540,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/proxy-url", s.mgmt.DeleteProxyURL)
 
 		mgmt.POST("/api-call", s.mgmt.APICall)
+		mgmt.GET("/quota-cache", s.mgmt.GetQuotaCache)
+		mgmt.POST("/quota-cache/refresh", s.mgmt.RefreshQuotaCache)
 
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
 		mgmt.PUT("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
@@ -808,6 +810,9 @@ func (s *Server) Start() error {
 	if s == nil || s.server == nil {
 		return fmt.Errorf("failed to start HTTP server: server not initialized")
 	}
+	if s.mgmt != nil {
+		s.mgmt.StartQuotaCacheScheduler(context.Background())
+	}
 
 	useTLS := s.cfg != nil && s.cfg.TLS.Enable
 	if useTLS {
@@ -841,6 +846,10 @@ func (s *Server) Start() error {
 //   - error: An error if the server fails to stop
 func (s *Server) Stop(ctx context.Context) error {
 	log.Debug("Stopping API server...")
+
+	if s.mgmt != nil {
+		s.mgmt.StopQuotaCacheScheduler(ctx)
+	}
 
 	if s.keepAliveEnabled {
 		select {
