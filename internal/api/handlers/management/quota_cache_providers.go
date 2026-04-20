@@ -318,6 +318,16 @@ func resolveCodexAccountInfo(auth *coreauth.Auth) (string, string) {
 }
 
 func buildCodexQuotaWindows(payload map[string]any) []map[string]any {
+	const (
+		codexFiveHourWindowSeconds int64 = 18000
+		codexWeeklyWindowSeconds   int64 = 604800
+	)
+
+	type codexWindowPair struct {
+		fiveHour map[string]any
+		weekly   map[string]any
+	}
+
 	windows := make([]map[string]any, 0)
 	appendWindow := func(id, labelKey string, window map[string]any, labelParams map[string]any) {
 		if len(window) == 0 {
@@ -344,14 +354,57 @@ func buildCodexQuotaWindows(payload map[string]any) []map[string]any {
 		}
 		windows = append(windows, entry)
 	}
+	windowSeconds := func(window map[string]any) (int64, bool) {
+		if len(window) == 0 {
+			return 0, false
+		}
+		return quotaInt64(firstNonNil(window["limit_window_seconds"], window["limitWindowSeconds"]))
+	}
+	pickClassifiedWindows := func(limitInfo map[string]any) codexWindowPair {
+		primaryWindow := quotaMap(firstNonNil(limitInfo["primary_window"], limitInfo["primaryWindow"]))
+		secondaryWindow := quotaMap(firstNonNil(limitInfo["secondary_window"], limitInfo["secondaryWindow"]))
+		primarySeconds, hasPrimarySeconds := windowSeconds(primaryWindow)
+		secondarySeconds, hasSecondarySeconds := windowSeconds(secondaryWindow)
+
+		pair := codexWindowPair{}
+		if hasPrimarySeconds {
+			switch primarySeconds {
+			case codexFiveHourWindowSeconds:
+				pair.fiveHour = primaryWindow
+			case codexWeeklyWindowSeconds:
+				pair.weekly = primaryWindow
+			}
+		}
+		if hasSecondarySeconds {
+			switch secondarySeconds {
+			case codexFiveHourWindowSeconds:
+				if len(pair.fiveHour) == 0 {
+					pair.fiveHour = secondaryWindow
+				}
+			case codexWeeklyWindowSeconds:
+				if len(pair.weekly) == 0 {
+					pair.weekly = secondaryWindow
+				}
+			}
+		}
+		if len(pair.fiveHour) == 0 && len(primaryWindow) != 0 && !hasPrimarySeconds {
+			pair.fiveHour = primaryWindow
+		}
+		if len(pair.weekly) == 0 && len(secondaryWindow) != 0 && !hasSecondarySeconds {
+			pair.weekly = secondaryWindow
+		}
+		return pair
+	}
 
 	rateLimit := quotaMap(firstNonNil(payload["rate_limit"], payload["rateLimit"]))
-	appendWindow("five-hour", "codex_quota.primary_window", quotaMap(firstNonNil(rateLimit["primary_window"], rateLimit["primaryWindow"])), nil)
-	appendWindow("weekly", "codex_quota.secondary_window", quotaMap(firstNonNil(rateLimit["secondary_window"], rateLimit["secondaryWindow"])), nil)
+	rateWindows := pickClassifiedWindows(rateLimit)
+	appendWindow("five-hour", "codex_quota.primary_window", rateWindows.fiveHour, nil)
+	appendWindow("weekly", "codex_quota.secondary_window", rateWindows.weekly, nil)
 
 	codeReview := quotaMap(firstNonNil(payload["code_review_rate_limit"], payload["codeReviewRateLimit"]))
-	appendWindow("code-review-five-hour", "codex_quota.code_review_primary_window", quotaMap(firstNonNil(codeReview["primary_window"], codeReview["primaryWindow"])), nil)
-	appendWindow("code-review-weekly", "codex_quota.code_review_secondary_window", quotaMap(firstNonNil(codeReview["secondary_window"], codeReview["secondaryWindow"])), nil)
+	codeReviewWindows := pickClassifiedWindows(codeReview)
+	appendWindow("code-review-five-hour", "codex_quota.code_review_primary_window", codeReviewWindows.fiveHour, nil)
+	appendWindow("code-review-weekly", "codex_quota.code_review_secondary_window", codeReviewWindows.weekly, nil)
 
 	for index, raw := range quotaArray(firstNonNil(payload["additional_rate_limits"], payload["additionalRateLimits"])) {
 		item := quotaMap(raw)
@@ -361,8 +414,9 @@ func buildCodexQuotaWindows(payload map[string]any) []map[string]any {
 			name = fmt.Sprintf("additional-%d", index+1)
 		}
 		labelParams := map[string]any{"name": name}
-		appendWindow(fmt.Sprintf("%s-five-hour-%d", normalizeQuotaIdentifier(name), index), "codex_quota.additional_primary_window", quotaMap(firstNonNil(rateInfo["primary_window"], rateInfo["primaryWindow"])), labelParams)
-		appendWindow(fmt.Sprintf("%s-weekly-%d", normalizeQuotaIdentifier(name), index), "codex_quota.additional_secondary_window", quotaMap(firstNonNil(rateInfo["secondary_window"], rateInfo["secondaryWindow"])), labelParams)
+		additionalWindows := pickClassifiedWindows(rateInfo)
+		appendWindow(fmt.Sprintf("%s-five-hour-%d", normalizeQuotaIdentifier(name), index), "codex_quota.additional_primary_window", additionalWindows.fiveHour, labelParams)
+		appendWindow(fmt.Sprintf("%s-weekly-%d", normalizeQuotaIdentifier(name), index), "codex_quota.additional_secondary_window", additionalWindows.weekly, labelParams)
 	}
 	return windows
 }

@@ -388,6 +388,178 @@ func TestQuotaCacheSchedulerDoesNotRunImmediateRefreshWhenCacheExists(t *testing
 	}
 }
 
+func TestBuildCodexQuotaWindowsClassifiesWindowsByDuration(t *testing.T) {
+	windows := buildCodexQuotaWindows(map[string]any{
+		"rate_limit": map[string]any{
+			"primary_window": map[string]any{
+				"used_percent":         84,
+				"limit_window_seconds": 604800,
+				"reset_at":             1770000000,
+			},
+			"secondary_window": map[string]any{
+				"used_percent":         21,
+				"limit_window_seconds": 18000,
+				"reset_at":             1760000000,
+			},
+		},
+		"code_review_rate_limit": map[string]any{
+			"primary_window": map[string]any{
+				"used_percent":         66,
+				"limit_window_seconds": 604800,
+				"reset_after_seconds":  7200,
+			},
+			"secondary_window": map[string]any{
+				"used_percent":         13,
+				"limit_window_seconds": 18000,
+				"reset_after_seconds":  1800,
+			},
+		},
+		"additional_rate_limits": []any{
+			map[string]any{
+				"limit_name": "Responses API",
+				"rate_limit": map[string]any{
+					"primary_window": map[string]any{
+						"used_percent":         92,
+						"limit_window_seconds": 604800,
+					},
+					"secondary_window": map[string]any{
+						"used_percent":         31,
+						"limit_window_seconds": 18000,
+					},
+				},
+			},
+		},
+	})
+
+	if got := quotaWindowByID(windows, "five-hour"); got == nil {
+		t.Fatal("missing five-hour window")
+	} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 21 {
+		t.Fatalf("five-hour usedPercent = %v, want 21", usedPercent)
+	}
+	if got := quotaWindowByID(windows, "weekly"); got == nil {
+		t.Fatal("missing weekly window")
+	} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 84 {
+		t.Fatalf("weekly usedPercent = %v, want 84", usedPercent)
+	}
+	if got := quotaWindowByID(windows, "code-review-five-hour"); got == nil {
+		t.Fatal("missing code-review-five-hour window")
+	} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 13 {
+		t.Fatalf("code-review-five-hour usedPercent = %v, want 13", usedPercent)
+	}
+	if got := quotaWindowByID(windows, "code-review-weekly"); got == nil {
+		t.Fatal("missing code-review-weekly window")
+	} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 66 {
+		t.Fatalf("code-review-weekly usedPercent = %v, want 66", usedPercent)
+	}
+	if got := quotaWindowByID(windows, "responses-api-five-hour-0"); got == nil {
+		t.Fatal("missing responses-api-five-hour-0 window")
+	} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 31 {
+		t.Fatalf("responses-api-five-hour-0 usedPercent = %v, want 31", usedPercent)
+	}
+	if got := quotaWindowByID(windows, "responses-api-weekly-0"); got == nil {
+		t.Fatal("missing responses-api-weekly-0 window")
+	} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 92 {
+		t.Fatalf("responses-api-weekly-0 usedPercent = %v, want 92", usedPercent)
+	}
+}
+
+func TestBuildCodexQuotaWindowsFallsBackToWindowOrderWithoutDuration(t *testing.T) {
+	windows := buildCodexQuotaWindows(map[string]any{
+		"rate_limit": map[string]any{
+			"primary_window": map[string]any{
+				"used_percent":        44,
+				"reset_after_seconds": 300,
+			},
+			"secondary_window": map[string]any{
+				"used_percent":        88,
+				"reset_after_seconds": 600,
+			},
+		},
+	})
+
+	if len(windows) != 2 {
+		t.Fatalf("windows len = %d, want 2", len(windows))
+	}
+	if got := quotaWindowByID(windows, "five-hour"); got == nil {
+		t.Fatal("missing five-hour window")
+	} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 44 {
+		t.Fatalf("five-hour usedPercent = %v, want 44", usedPercent)
+	}
+	if got := quotaWindowByID(windows, "weekly"); got == nil {
+		t.Fatal("missing weekly window")
+	} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 88 {
+		t.Fatalf("weekly usedPercent = %v, want 88", usedPercent)
+	}
+}
+
+func TestBuildCodexQuotaWindowsDoesNotFallbackUnexpectedDuration(t *testing.T) {
+	t.Run("primary unexpected duration does not become five-hour", func(t *testing.T) {
+		windows := buildCodexQuotaWindows(map[string]any{
+			"rate_limit": map[string]any{
+				"primary_window": map[string]any{
+					"used_percent":         44,
+					"limit_window_seconds": 86400,
+				},
+				"secondary_window": map[string]any{
+					"used_percent":         88,
+					"limit_window_seconds": 604800,
+				},
+			},
+		})
+
+		if got := quotaWindowByID(windows, "five-hour"); got != nil {
+			t.Fatalf("unexpected five-hour window: %#v", got)
+		}
+		if got := quotaWindowByID(windows, "weekly"); got == nil {
+			t.Fatal("missing weekly window")
+		} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 88 {
+			t.Fatalf("weekly usedPercent = %v, want 88", usedPercent)
+		}
+	})
+
+	t.Run("secondary unexpected duration does not become weekly", func(t *testing.T) {
+		windows := buildCodexQuotaWindows(map[string]any{
+			"rate_limit": map[string]any{
+				"primary_window": map[string]any{
+					"used_percent":         11,
+					"limit_window_seconds": 18000,
+				},
+				"secondary_window": map[string]any{
+					"used_percent":         77,
+					"limit_window_seconds": 86400,
+				},
+			},
+		})
+
+		if got := quotaWindowByID(windows, "five-hour"); got == nil {
+			t.Fatal("missing five-hour window")
+		} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 11 {
+			t.Fatalf("five-hour usedPercent = %v, want 11", usedPercent)
+		}
+		if got := quotaWindowByID(windows, "weekly"); got != nil {
+			t.Fatalf("unexpected weekly window: %#v", got)
+		}
+	})
+}
+
+func quotaWindowByID(windows []map[string]any, id string) map[string]any {
+	for _, window := range windows {
+		if quotaString(window["id"]) == id {
+			return window
+		}
+	}
+	return nil
+}
+
+func quotaWindowUsedPercent(t *testing.T, window map[string]any) float64 {
+	t.Helper()
+	usedPercent, ok := quotaFloat64(window["usedPercent"])
+	if !ok {
+		t.Fatalf("missing usedPercent in window %#v", window)
+	}
+	return usedPercent
+}
+
 func mustMarshalQuotaPayload(t *testing.T, value any) json.RawMessage {
 	t.Helper()
 	data, err := json.Marshal(value)
