@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -15,59 +16,77 @@ func TestShouldRefreshQuotaEntry(t *testing.T) {
 	younger := now.Add(-30 * time.Minute)
 	futureRecover := now.Add(2 * time.Hour)
 	pastRecover := now.Add(-10 * time.Minute)
+	interval := time.Hour
+	customInterval := 20 * time.Minute
 
 	tests := []struct {
-		name  string
-		entry quotaCacheEntry
-		force bool
-		want  bool
+		name     string
+		entry    quotaCacheEntry
+		force    bool
+		interval time.Duration
+		want     bool
 	}{
 		{
-			name:  "unauthorized skipped automatically",
-			entry: quotaCacheEntry{Status: quotaCacheStatusUnauthorized, LastRefreshAt: &older},
-			want:  false,
+			name:     "unauthorized skipped automatically",
+			entry:    quotaCacheEntry{Status: quotaCacheStatusUnauthorized, LastRefreshAt: &older},
+			interval: interval,
+			want:     false,
 		},
 		{
-			name:  "unauthorized included when forced",
-			entry: quotaCacheEntry{Status: quotaCacheStatusUnauthorized, LastRefreshAt: &younger},
-			force: true,
-			want:  true,
+			name:     "unauthorized included when forced",
+			entry:    quotaCacheEntry{Status: quotaCacheStatusUnauthorized, LastRefreshAt: &younger},
+			force:    true,
+			interval: interval,
+			want:     true,
 		},
 		{
-			name:  "fresh younger than one hour skipped",
-			entry: quotaCacheEntry{Status: quotaCacheStatusFresh, LastRefreshAt: &younger},
-			want:  false,
+			name:     "fresh younger than interval skipped",
+			entry:    quotaCacheEntry{Status: quotaCacheStatusFresh, LastRefreshAt: &younger},
+			interval: interval,
+			want:     false,
 		},
 		{
-			name:  "fresh older than one hour included",
-			entry: quotaCacheEntry{Status: quotaCacheStatusFresh, LastRefreshAt: &older},
-			want:  true,
+			name:     "fresh older than interval included",
+			entry:    quotaCacheEntry{Status: quotaCacheStatusFresh, LastRefreshAt: &older},
+			interval: interval,
+			want:     true,
 		},
 		{
-			name:  "rate limited with future recovery skipped",
-			entry: quotaCacheEntry{Status: quotaCacheStatusRateLimited, LastRefreshAt: &older, QuotaRecoverAt: &futureRecover},
-			want:  false,
+			name:     "custom interval refreshes sooner",
+			entry:    quotaCacheEntry{Status: quotaCacheStatusFresh, LastRefreshAt: &younger},
+			interval: customInterval,
+			want:     true,
 		},
 		{
-			name:  "rate limited with past recovery included",
-			entry: quotaCacheEntry{Status: quotaCacheStatusRateLimited, LastRefreshAt: &younger, QuotaRecoverAt: &pastRecover},
-			want:  true,
+			name:     "rate limited with future recovery skipped",
+			entry:    quotaCacheEntry{Status: quotaCacheStatusRateLimited, LastRefreshAt: &older, QuotaRecoverAt: &futureRecover},
+			interval: interval,
+			want:     false,
 		},
 		{
-			name:  "rate limited without recovery skipped automatically",
-			entry: quotaCacheEntry{Status: quotaCacheStatusRateLimited, LastRefreshAt: &older},
-			want:  false,
+			name:     "rate limited with past recovery included",
+			entry:    quotaCacheEntry{Status: quotaCacheStatusRateLimited, LastRefreshAt: &younger, QuotaRecoverAt: &pastRecover},
+			interval: interval,
+			want:     true,
 		},
 		{
-			name:  "rate limited without recovery included when forced",
-			entry: quotaCacheEntry{Status: quotaCacheStatusRateLimited, LastRefreshAt: &younger},
-			force: true,
-			want:  true,
+			name:     "rate limited without recovery skipped automatically",
+			entry:    quotaCacheEntry{Status: quotaCacheStatusRateLimited, LastRefreshAt: &older},
+			interval: interval,
+			want:     false,
 		},
 		{
-			name:  "pending without last refresh included",
-			entry: quotaCacheEntry{Status: quotaCacheStatusPending},
-			want:  true,
+			name:     "rate limited without recovery included when forced",
+			entry:    quotaCacheEntry{Status: quotaCacheStatusRateLimited, LastRefreshAt: &younger},
+			force:    true,
+			interval: interval,
+			want:     true,
+		},
+		{
+			name:     "pending without last refresh included",
+			entry:    quotaCacheEntry{Status: quotaCacheStatusPending},
+			interval: interval,
+			want:     true,
 		},
 	}
 
@@ -75,11 +94,25 @@ func TestShouldRefreshQuotaEntry(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := shouldRefreshQuotaEntry(tt.entry, now, tt.force)
+			got := shouldRefreshQuotaEntry(tt.entry, now, tt.force, tt.interval)
 			if got != tt.want {
 				t.Fatalf("shouldRefreshQuotaEntry() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestQuotaCacheServiceRefreshInterval(t *testing.T) {
+	t.Parallel()
+
+	service := newQuotaCacheService(nil, "", nil)
+	if got := service.quotaCacheRefreshInterval(); got != time.Duration(config.DefaultQuotaCacheRefreshInterval)*time.Second {
+		t.Fatalf("quotaCacheRefreshInterval() = %v, want %v", got, time.Duration(config.DefaultQuotaCacheRefreshInterval)*time.Second)
+	}
+
+	service.SetConfig(&config.Config{QuotaCacheRefreshInterval: 90})
+	if got := service.quotaCacheRefreshInterval(); got != 90*time.Second {
+		t.Fatalf("quotaCacheRefreshInterval() = %v, want %v", got, 90*time.Second)
 	}
 }
 
@@ -123,8 +156,11 @@ func TestQuotaCacheSelection(t *testing.T) {
 		{Name: quotaAuthName(rateMissingAuth), Provider: supportedQuotaProvider(rateMissingAuth), Status: quotaCacheStatusRateLimited, LastRefreshAt: &freshOld},
 	})
 
-	automaticTargets := selectQuotaRefreshTargets(auths, entries, nil, false, now)
+	automaticTargets := selectQuotaRefreshTargets(auths, entries, nil, false, now, time.Hour)
 	assertQuotaTargetAuthIndexes(t, automaticTargets, []string{freshOldAuth.Index, missingEntryAuth.Index, ratePastAuth.Index})
+
+	customIntervalTargets := selectQuotaRefreshTargets(auths, entries, nil, false, now, 5*time.Minute)
+	assertQuotaTargetAuthIndexes(t, customIntervalTargets, []string{freshOldAuth.Index, freshRecentAuth.Index, missingEntryAuth.Index, ratePastAuth.Index})
 
 	forcedIndexes := map[string]struct{}{
 		disabledAuth.Index:     {},
@@ -134,7 +170,7 @@ func TestQuotaCacheSelection(t *testing.T) {
 		missingEntryAuth.Index: {},
 		unsupportedAuth.Index:  {},
 	}
-	forcedTargets := selectQuotaRefreshTargets(auths, entries, forcedIndexes, true, now)
+	forcedTargets := selectQuotaRefreshTargets(auths, entries, forcedIndexes, true, now, time.Hour)
 	assertQuotaTargetAuthIndexes(t, forcedTargets, []string{missingEntryAuth.Index, rateFutureAuth.Index, rateMissingAuth.Index, unauthorizedAuth.Index})
 }
 

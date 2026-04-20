@@ -388,6 +388,77 @@ func TestQuotaCacheSchedulerDoesNotRunImmediateRefreshWhenCacheExists(t *testing
 	}
 }
 
+func TestQuotaCacheSchedulerRecalculatesWaitAfterConfigChange(t *testing.T) {
+	writablePath := t.TempDir()
+	t.Setenv("WRITABLE_PATH", writablePath)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "gemini-auth",
+		Provider: "gemini-cli",
+		FileName: "gemini.json",
+		Status:   coreauth.StatusActive,
+	}
+	auth.EnsureIndex()
+	if _, err := manager.Register(nil, auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	now := time.Now().UTC()
+	repo := &quotaCacheRepository{path: filepath.Join(writablePath, "CLIProxyAPI", "management", quotaCacheFileName)}
+	if err := repo.Save(quotaCacheSnapshotWithEntries([]quotaCacheEntry{{
+		Name:          auth.FileName,
+		Provider:      supportedQuotaProvider(auth),
+		AuthIndex:     auth.Index,
+		Status:        quotaCacheStatusFresh,
+		LastRefreshAt: timePointer(now.Add(-120 * time.Millisecond)),
+		Payload:       mustMarshalQuotaPayload(t, map[string]any{"buckets": []any{}}),
+	}}, now.Add(-120*time.Millisecond))); err != nil {
+		t.Fatalf("save cache snapshot: %v", err)
+	}
+
+	h := NewHandler(&config.Config{QuotaCacheRefreshInterval: 2}, filepath.Join(t.TempDir(), "config.yaml"), manager)
+	probeCalled := make(chan time.Time, 2)
+	h.quotaCache.probe = func(_ *quotaCacheService, _ any, target quotaRefreshTarget) quotaProbeResult {
+		if target.AuthIndex != auth.Index {
+			t.Fatalf("target auth index = %q, want %q", target.AuthIndex, auth.Index)
+		}
+		select {
+		case probeCalled <- time.Now():
+		default:
+		}
+		return quotaProbeResult{Payload: mustMarshalQuotaPayload(t, map[string]any{"buckets": []any{}})}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer h.StopQuotaCacheScheduler(context.Background())
+	start := time.Now()
+	h.StartQuotaCacheScheduler(ctx)
+
+	select {
+	case calledAt := <-probeCalled:
+		t.Fatalf("expected scheduler to keep waiting before config change, but refreshed after %v", calledAt.Sub(start))
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	changeAt := time.Now()
+	h.SetConfig(&config.Config{QuotaCacheRefreshInterval: 1})
+
+	select {
+	case calledAt := <-probeCalled:
+		if calledAt.Sub(changeAt) >= 1300*time.Millisecond {
+			t.Fatalf("expected config change to use the new interval, refresh happened %v after change", calledAt.Sub(changeAt))
+		}
+		if calledAt.Sub(start) >= 1800*time.Millisecond {
+			t.Fatalf("expected config change to interrupt the old wait, refresh happened after %v", calledAt.Sub(start))
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("expected scheduler to refresh soon after config change")
+	}
+}
+
 func TestBuildCodexQuotaWindowsClassifiesWindowsByDuration(t *testing.T) {
 	windows := buildCodexQuotaWindows(map[string]any{
 		"rate_limit": map[string]any{

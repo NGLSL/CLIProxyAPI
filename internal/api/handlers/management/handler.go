@@ -114,6 +114,9 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 	if h.quotaCache != nil {
 		h.quotaCache.SetConfig(cfg)
 	}
+	if h.quotaCacheScheduler != nil {
+		h.quotaCacheScheduler.NotifyConfigChanged()
+	}
 }
 
 // SetAuthManager updates the auth manager reference used by management endpoints.

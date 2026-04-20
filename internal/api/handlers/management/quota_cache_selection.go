@@ -8,7 +8,7 @@ import (
 	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
-const quotaCacheRefreshInterval = time.Hour
+const defaultQuotaCacheRefreshInterval = time.Hour
 
 type quotaRefreshTarget struct {
 	Auth      *coreauth.Auth
@@ -47,9 +47,12 @@ func quotaAuthName(auth *coreauth.Auth) string {
 	return strings.TrimSpace(auth.ID)
 }
 
-func shouldRefreshQuotaEntry(entry quotaCacheEntry, now time.Time, force bool) bool {
+func shouldRefreshQuotaEntry(entry quotaCacheEntry, now time.Time, force bool, interval time.Duration) bool {
 	if force {
 		return true
+	}
+	if interval <= 0 {
+		interval = defaultQuotaCacheRefreshInterval
 	}
 	if entry.Status == quotaCacheStatusUnauthorized {
 		return false
@@ -63,10 +66,13 @@ func shouldRefreshQuotaEntry(entry quotaCacheEntry, now time.Time, force bool) b
 	if entry.LastRefreshAt == nil || entry.LastRefreshAt.IsZero() {
 		return true
 	}
-	return now.Sub(*entry.LastRefreshAt) >= quotaCacheRefreshInterval
+	return now.Sub(*entry.LastRefreshAt) >= interval
 }
 
-func selectQuotaRefreshTargets(auths []*coreauth.Auth, entries map[string]quotaCacheEntry, authIndexes map[string]struct{}, force bool, now time.Time) []quotaRefreshTarget {
+func selectQuotaRefreshTargets(auths []*coreauth.Auth, entries map[string]quotaCacheEntry, authIndexes map[string]struct{}, force bool, now time.Time, interval time.Duration) []quotaRefreshTarget {
+	if interval <= 0 {
+		interval = defaultQuotaCacheRefreshInterval
+	}
 	targets := make([]quotaRefreshTarget, 0, len(auths))
 	for _, auth := range auths {
 		if auth == nil {
@@ -91,7 +97,7 @@ func selectQuotaRefreshTargets(auths []*coreauth.Auth, entries map[string]quotaC
 		}
 		if !force {
 			entry, ok := entries[quotaCacheKey(provider, name)]
-			if ok && !shouldRefreshQuotaEntry(entry, now, false) {
+			if ok && !shouldRefreshQuotaEntry(entry, now, false, interval) {
 				continue
 			}
 		}

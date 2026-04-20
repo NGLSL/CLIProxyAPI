@@ -124,6 +124,7 @@ func (s *quotaCacheService) Refresh(ctx any, req quotaCacheRefreshRequest) (quot
 	}
 
 	now := time.Now().UTC()
+	interval := s.quotaCacheRefreshInterval()
 	auths := s.listAuths()
 	requestedIndexes, err := s.validateRequestedAuthIndexes(auths, req.AuthIndexes)
 	if err != nil {
@@ -132,7 +133,7 @@ func (s *quotaCacheService) Refresh(ctx any, req quotaCacheRefreshRequest) (quot
 
 	currentSnapshot := s.Snapshot()
 	entryMap := quotaCacheEntryMap(currentSnapshot.Entries)
-	targets := selectQuotaRefreshTargets(auths, entryMap, requestedIndexes, req.Force, now)
+	targets := selectQuotaRefreshTargets(auths, entryMap, requestedIndexes, req.Force, now, interval)
 	if len(requestedIndexes) > 0 && len(targets) == 0 {
 		return quotaCacheRefreshResponse{}, quotaCacheRequestError("no eligible auth entries matched auth_indexes")
 	}
@@ -164,6 +165,24 @@ func (s *quotaCacheService) Refresh(ctx any, req quotaCacheRefreshRequest) (quot
 		UpdatedAt: snapshot.UpdatedAt,
 		Entries:   updatedEntries,
 	}, nil
+}
+
+func (s *quotaCacheService) quotaCacheRefreshInterval() time.Duration {
+	if s == nil {
+		return time.Duration(config.DefaultQuotaCacheRefreshInterval) * time.Second
+	}
+	defaultInterval := time.Duration(config.DefaultQuotaCacheRefreshInterval) * time.Second
+	if defaultInterval <= 0 {
+		defaultInterval = time.Hour
+	}
+
+	s.mu.RLock()
+	cfg := s.cfg
+	s.mu.RUnlock()
+	if cfg == nil || cfg.QuotaCacheRefreshInterval <= 0 {
+		return defaultInterval
+	}
+	return time.Duration(cfg.QuotaCacheRefreshInterval) * time.Second
 }
 
 func (s *quotaCacheService) helperHandler() *Handler {

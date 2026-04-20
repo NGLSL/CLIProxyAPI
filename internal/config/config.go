@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
-	DefaultPprofAddr             = "127.0.0.1:8316"
-	DefaultRoutingStickyTTL      = 1800
+	DefaultPanelGitHubRepository     = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPprofAddr                 = "127.0.0.1:8316"
+	DefaultRoutingStickyTTL          = 1800
+	DefaultQuotaCacheRefreshInterval = 3600
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -66,6 +67,9 @@ type Config struct {
 
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
+
+	// QuotaCacheRefreshInterval controls the automatic quota cache refresh interval in seconds.
+	QuotaCacheRefreshInterval int `yaml:"quota-cache-refresh-interval" json:"quota-cache-refresh-interval"`
 
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
@@ -591,6 +595,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.QuotaCacheRefreshInterval = DefaultQuotaCacheRefreshInterval
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -647,6 +652,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.Routing.StickyTTL <= 0 {
 		cfg.Routing.StickyTTL = DefaultRoutingStickyTTL
+	}
+
+	if cfg.QuotaCacheRefreshInterval <= 0 {
+		cfg.QuotaCacheRefreshInterval = DefaultQuotaCacheRefreshInterval
 	}
 
 	if cfg.LogsMaxTotalSizeMB < 0 {
@@ -1340,6 +1349,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
+		case "quota-cache-refresh-interval":
+			return node.Value == strconv.Itoa(DefaultQuotaCacheRefreshInterval)
 		case "routing.sticky-ttl":
 			return node.Value == strconv.Itoa(DefaultRoutingStickyTTL)
 		}

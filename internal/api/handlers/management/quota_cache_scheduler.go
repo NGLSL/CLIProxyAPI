@@ -14,16 +14,18 @@ const quotaCacheRefreshBatchSize = 20
 type quotaCacheScheduler struct {
 	service *quotaCacheService
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
-	rand   *rand.Rand
+	mu             sync.Mutex
+	cancel         context.CancelFunc
+	done           chan struct{}
+	rand           *rand.Rand
+	configChangedC chan struct{}
 }
 
 func newQuotaCacheScheduler(service *quotaCacheService) *quotaCacheScheduler {
 	return &quotaCacheScheduler{
-		service: service,
-		rand:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		service:        service,
+		rand:           rand.New(rand.NewSource(time.Now().UnixNano())),
+		configChangedC: make(chan struct{}, 1),
 	}
 }
 
@@ -72,6 +74,16 @@ func (s *quotaCacheScheduler) Stop(ctx context.Context) {
 	}
 }
 
+func (s *quotaCacheScheduler) NotifyConfigChanged() {
+	if s == nil {
+		return
+	}
+	select {
+	case s.configChangedC <- struct{}{}:
+	default:
+	}
+}
+
 func (s *quotaCacheScheduler) run(ctx context.Context, done chan struct{}) {
 	defer close(done)
 	snapshot, existed, err := s.service.Load()
@@ -82,15 +94,39 @@ func (s *quotaCacheScheduler) run(ctx context.Context, done chan struct{}) {
 		s.refreshInBatches(ctx, false)
 	}
 
-	ticker := time.NewTicker(quotaCacheRefreshInterval)
-	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		refresh, ok := s.waitForNextCycle(ctx, s.service.quotaCacheRefreshInterval())
+		if !ok {
 			return
-		case <-ticker.C:
-			s.refreshInBatches(ctx, false)
 		}
+		if !refresh {
+			continue
+		}
+		s.refreshInBatches(ctx, false)
+	}
+}
+
+func (s *quotaCacheScheduler) waitForNextCycle(ctx context.Context, wait time.Duration) (bool, bool) {
+	if wait <= 0 {
+		wait = defaultQuotaCacheRefreshInterval
+	}
+	timer := time.NewTimer(wait)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return false, false
+	case <-s.configChangedC:
+		return false, true
+	case <-timer.C:
+		return true, true
 	}
 }
 
@@ -98,9 +134,10 @@ func (s *quotaCacheScheduler) refreshInBatches(ctx context.Context, force bool) 
 	if s == nil || s.service == nil {
 		return
 	}
+	interval := s.service.quotaCacheRefreshInterval()
 	auths := s.service.listAuths()
 	entryMap := quotaCacheEntryMap(s.service.Snapshot().Entries)
-	targets := selectQuotaRefreshTargets(auths, entryMap, nil, force, time.Now().UTC())
+	targets := selectQuotaRefreshTargets(auths, entryMap, nil, force, time.Now().UTC(), interval)
 	for start := 0; start < len(targets); start += quotaCacheRefreshBatchSize {
 		end := start + quotaCacheRefreshBatchSize
 		if end > len(targets) {
