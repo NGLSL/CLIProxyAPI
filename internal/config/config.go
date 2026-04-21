@@ -24,6 +24,7 @@ const (
 	DefaultPanelGitHubRepository     = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr                 = "127.0.0.1:8316"
 	DefaultRoutingStickyTTL          = 1800
+	DefaultRoutingSourcePreference   = "none"
 	DefaultQuotaCacheRefreshInterval = 3600
 )
 
@@ -222,6 +223,9 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first", "sticky-round-robin".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	// SourcePreference controls whether routing prefers API-backed or file-backed sources first.
+	// Supported values: "none" (default), "api-first", "file-first".
+	SourcePreference string `yaml:"source-preference,omitempty" json:"source-preference,omitempty"`
 	// StickyTTL controls how long sticky-round-robin bindings remain valid, in seconds.
 	StickyTTL int `yaml:"sticky-ttl,omitempty" json:"sticky-ttl,omitempty"`
 }
@@ -569,6 +573,15 @@ func LoadConfig(configFile string) (*Config, error) {
 // LoadConfigOptional reads YAML from configFile.
 // If optional is true and the file is missing, it returns an empty Config.
 // If optional is true and the file is empty or invalid, it returns an empty Config.
+func normalizeRoutingSourcePreference(value string) string {
+	switch strings.TrimSpace(value) {
+	case "api-first", "file-first":
+		return strings.TrimSpace(value)
+	default:
+		return DefaultRoutingSourcePreference
+	}
+}
+
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Read the entire configuration file into memory.
 	data, err := os.ReadFile(configFile)
@@ -601,6 +614,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.Routing.SourcePreference = DefaultRoutingSourcePreference
 	cfg.Routing.StickyTTL = DefaultRoutingStickyTTL
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
@@ -649,6 +663,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.Pprof.Addr == "" {
 		cfg.Pprof.Addr = DefaultPprofAddr
 	}
+
+	cfg.Routing.SourcePreference = normalizeRoutingSourcePreference(cfg.Routing.SourcePreference)
 
 	if cfg.Routing.StickyTTL <= 0 {
 		cfg.Routing.StickyTTL = DefaultRoutingStickyTTL
@@ -1341,6 +1357,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == DefaultPanelGitHubRepository
 		case "routing.strategy":
 			return node.Value == "round-robin"
+		case "routing.source-preference":
+			return node.Value == DefaultRoutingSourcePreference
 		}
 	}
 

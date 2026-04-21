@@ -612,6 +612,101 @@ func TestSchedulerPick_StickyRoundRobinFallsBackWhenBoundAuthUnavailable(t *test
 	}
 }
 
+func TestSchedulerPick_ApiFirstKeepsSelectionInsideAPILayer(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "api-low", Provider: "gemini", Attributes: map[string]string{"source_type": "api", "priority": "0"}},
+		&Auth{ID: "file-high", Provider: "gemini", Attributes: map[string]string{"source_type": "file", "priority": "10"}},
+	)
+	scheduler.sourcePreference = routingSourcePreferenceAPIFirst
+
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "api-low" {
+		t.Fatalf("pickSingle() auth = %v, want auth api-low", got)
+	}
+}
+
+func TestSchedulerPick_ApiFirstFallsBackToFileLayer(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:             "api-cooldown",
+			Provider:       "gemini",
+			Attributes:     map[string]string{"source_type": "api", "priority": "10"},
+			Unavailable:    true,
+			NextRetryAfter: time.Now().Add(time.Minute),
+			Quota:          QuotaState{Exceeded: true},
+		},
+		&Auth{ID: "file-ready", Provider: "gemini", Attributes: map[string]string{"source_type": "file", "priority": "0"}},
+	)
+	scheduler.sourcePreference = routingSourcePreferenceAPIFirst
+
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "file-ready" {
+		t.Fatalf("pickSingle() auth = %v, want auth file-ready", got)
+	}
+}
+
+func TestSchedulerPick_FileFirstKeepsSelectionInsideFileLayer(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "api-high", Provider: "gemini", Attributes: map[string]string{"source_type": "api", "priority": "10"}},
+		&Auth{ID: "file-low", Provider: "gemini", Attributes: map[string]string{"source_type": "file", "priority": "0"}},
+	)
+	scheduler.sourcePreference = routingSourcePreferenceFileFirst
+
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "file-low" {
+		t.Fatalf("pickSingle() auth = %v, want auth file-low", got)
+	}
+}
+
+func TestSchedulerPick_StickyRoundRobinRebindsWhenPreferredLayerReturns(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&StickyRoundRobinSelector{},
+		&Auth{ID: "api-ready", Provider: "gemini", Attributes: map[string]string{"source_type": "api"}},
+		&Auth{ID: "file-ready", Provider: "gemini", Attributes: map[string]string{"source_type": "file"}},
+	)
+	scheduler.sourcePreference = routingSourcePreferenceAPIFirst
+
+	bindingKey := scheduler.stickyBindingKey("gemini", "", "route-a")
+	scheduler.setStickyBindingForTest(bindingKey, "file-ready", time.Now().Add(time.Minute))
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.StickyRouteMetadataKey: "route-a"}}
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "api-ready" {
+		t.Fatalf("pickSingle() auth = %v, want auth api-ready", got)
+	}
+
+	binding, ok := scheduler.stickyBindingForTest(bindingKey)
+	if !ok {
+		t.Fatalf("stickyBindingForTest() ok = false")
+	}
+	if binding.authID != "api-ready" {
+		t.Fatalf("stickyBindingForTest().authID = %q, want %q", binding.authID, "api-ready")
+	}
+}
+
 func TestSchedulerPick_MixedProvidersStickyRoundRobinBindsProviderAndAuth(t *testing.T) {
 	t.Parallel()
 
@@ -686,5 +781,69 @@ func TestManager_SetConfig_UpdatesSchedulerStickyTTL(t *testing.T) {
 	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{StickyTTL: 0}})
 	if got := manager.scheduler.stickyTTLSecondsLocked(); got != internalconfig.DefaultRoutingStickyTTL {
 		t.Fatalf("stickyTTLSecondsLocked() after defaulting = %d, want %d", got, internalconfig.DefaultRoutingStickyTTL)
+	}
+}
+
+func TestSchedulerPick_MixedProvidersSourcePreferenceUsesPreferredLayerAcrossProviderSet(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "gemini-file-high", Provider: "gemini", Attributes: map[string]string{"source_type": "file", "priority": "10"}},
+		&Auth{ID: "claude-api-low", Provider: "claude", Attributes: map[string]string{"source_type": "api", "priority": "0"}},
+	)
+	scheduler.sourcePreference = routingSourcePreferenceAPIFirst
+
+	got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickMixed() error = %v", errPick)
+	}
+	if got == nil || got.ID != "claude-api-low" || provider != "claude" {
+		t.Fatalf("pickMixed() got auth=%v provider=%q, want claude-api-low/claude", got, provider)
+	}
+}
+
+func TestSchedulerPick_MixedProvidersSourcePreferenceFallsBackAcrossProviderSet(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:             "gemini-api-cooldown",
+			Provider:       "gemini",
+			Attributes:     map[string]string{"source_type": "api", "priority": "10"},
+			Unavailable:    true,
+			NextRetryAfter: time.Now().Add(time.Minute),
+			Quota:          QuotaState{Exceeded: true},
+		},
+		&Auth{ID: "claude-file-ready", Provider: "claude", Attributes: map[string]string{"source_type": "file", "priority": "0"}},
+	)
+	scheduler.sourcePreference = routingSourcePreferenceAPIFirst
+
+	got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickMixed() error = %v", errPick)
+	}
+	if got == nil || got.ID != "claude-file-ready" || provider != "claude" {
+		t.Fatalf("pickMixed() got auth=%v provider=%q, want claude-file-ready/claude", got, provider)
+	}
+}
+
+func TestManager_SetConfig_UpdatesSchedulerSourcePreference(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	if got := manager.scheduler.sourcePreferenceStringLocked(); got != string(routingSourcePreferenceNone) {
+		t.Fatalf("sourcePreferenceStringLocked() = %q, want %q", got, routingSourcePreferenceNone)
+	}
+
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{SourcePreference: "api-first"}})
+	if got := manager.scheduler.sourcePreferenceStringLocked(); got != string(routingSourcePreferenceAPIFirst) {
+		t.Fatalf("sourcePreferenceStringLocked() after SetConfig = %q, want %q", got, routingSourcePreferenceAPIFirst)
+	}
+
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{SourcePreference: "invalid"}})
+	if got := manager.scheduler.sourcePreferenceStringLocked(); got != string(routingSourcePreferenceNone) {
+		t.Fatalf("sourcePreferenceStringLocked() after normalization = %q, want %q", got, routingSourcePreferenceNone)
 	}
 }

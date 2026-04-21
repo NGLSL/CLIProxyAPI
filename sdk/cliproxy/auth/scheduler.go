@@ -15,11 +15,26 @@ import (
 // schedulerStrategy identifies which built-in routing semantics the scheduler should apply.
 type schedulerStrategy int
 
+// routingSourcePreference identifies which auth source layer should be preferred.
+type routingSourcePreference string
+
+// authSourceType identifies the origin layer of a synthesized auth.
+type authSourceType string
+
 const (
 	schedulerStrategyCustom schedulerStrategy = iota
 	schedulerStrategyRoundRobin
 	schedulerStrategyFillFirst
 	schedulerStrategyStickyRoundRobin
+)
+
+const (
+	routingSourcePreferenceNone      routingSourcePreference = "none"
+	routingSourcePreferenceAPIFirst  routingSourcePreference = "api-first"
+	routingSourcePreferenceFileFirst routingSourcePreference = "file-first"
+
+	authSourceTypeAPI  authSourceType = "api"
+	authSourceTypeFile authSourceType = "file"
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -34,13 +49,14 @@ const (
 
 // authScheduler keeps the incremental provider/model scheduling state used by Manager.
 type authScheduler struct {
-	mu             sync.Mutex
-	strategy       schedulerStrategy
-	providers      map[string]*providerScheduler
-	authProviders  map[string]string
-	mixedCursors   map[string]int
-	stickyBindings map[string]stickyAuthBinding
-	stickyTTL      time.Duration
+	mu               sync.Mutex
+	strategy         schedulerStrategy
+	sourcePreference routingSourcePreference
+	providers        map[string]*providerScheduler
+	authProviders    map[string]string
+	mixedCursors     map[string]int
+	stickyBindings   map[string]stickyAuthBinding
+	stickyTTL        time.Duration
 }
 
 type stickyAuthBinding struct {
@@ -60,6 +76,7 @@ type scheduledAuthMeta struct {
 	auth              *Auth
 	providerKey       string
 	priority          int
+	sourceType        authSourceType
 	virtualParent     string
 	websocketEnabled  bool
 	supportedModelSet map[string]struct{}
@@ -172,15 +189,79 @@ func normalizeCursor(cursor, size int) int {
 	return cursor
 }
 
+func normalizeSchedulerSourcePreference(raw string) routingSourcePreference {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(routingSourcePreferenceAPIFirst):
+		return routingSourcePreferenceAPIFirst
+	case string(routingSourcePreferenceFileFirst):
+		return routingSourcePreferenceFileFirst
+	default:
+		return routingSourcePreferenceNone
+	}
+}
+
+func normalizeAuthSourceType(raw string) authSourceType {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(authSourceTypeAPI):
+		return authSourceTypeAPI
+	case string(authSourceTypeFile):
+		return authSourceTypeFile
+	default:
+		return ""
+	}
+}
+
+func withSourceTypePredicate(base func(*scheduledAuth) bool, sourceType authSourceType) func(*scheduledAuth) bool {
+	if sourceType == "" {
+		return base
+	}
+	return func(entry *scheduledAuth) bool {
+		if entry == nil || entry.meta == nil || entry.meta.sourceType != sourceType {
+			return false
+		}
+		return base == nil || base(entry)
+	}
+}
+
+func (s *authScheduler) activeSourcePredicateLocked(shards []*modelScheduler, preferWebsocket bool, base func(*scheduledAuth) bool) func(*scheduledAuth) bool {
+	if s == nil || s.sourcePreference == routingSourcePreferenceNone {
+		return base
+	}
+
+	var order []authSourceType
+	switch s.sourcePreference {
+	case routingSourcePreferenceAPIFirst:
+		order = []authSourceType{authSourceTypeAPI, authSourceTypeFile}
+	case routingSourcePreferenceFileFirst:
+		order = []authSourceType{authSourceTypeFile, authSourceTypeAPI}
+	default:
+		return base
+	}
+
+	for _, sourceType := range order {
+		filtered := withSourceTypePredicate(base, sourceType)
+		for _, shard := range shards {
+			if shard == nil {
+				continue
+			}
+			if _, ok := shard.highestReadyPriorityLocked(preferWebsocket, filtered); ok {
+				return filtered
+			}
+		}
+	}
+	return base
+}
+
 // newAuthScheduler constructs an empty scheduler configured for the supplied selector strategy.
 func newAuthScheduler(selector Selector) *authScheduler {
 	return &authScheduler{
-		strategy:       selectorStrategy(selector),
-		providers:      make(map[string]*providerScheduler),
-		authProviders:  make(map[string]string),
-		mixedCursors:   make(map[string]int),
-		stickyBindings: make(map[string]stickyAuthBinding),
-		stickyTTL:      time.Duration(internalconfig.DefaultRoutingStickyTTL) * time.Second,
+		strategy:         selectorStrategy(selector),
+		sourcePreference: routingSourcePreferenceNone,
+		providers:        make(map[string]*providerScheduler),
+		authProviders:    make(map[string]string),
+		mixedCursors:     make(map[string]int),
+		stickyBindings:   make(map[string]stickyAuthBinding),
+		stickyTTL:        time.Duration(internalconfig.DefaultRoutingStickyTTL) * time.Second,
 	}
 }
 
@@ -223,6 +304,22 @@ func (s *authScheduler) setStickyTTL(ttlSeconds int) {
 	s.mu.Lock()
 	s.stickyTTL = time.Duration(ttlSeconds) * time.Second
 	s.mu.Unlock()
+}
+
+func (s *authScheduler) setSourcePreference(preference string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.sourcePreference = normalizeSchedulerSourcePreference(preference)
+	s.mu.Unlock()
+}
+
+func (s *authScheduler) sourcePreferenceStringLocked() string {
+	if s == nil || s.sourcePreference == "" {
+		return string(routingSourcePreferenceNone)
+	}
+	return string(s.sourcePreference)
 }
 
 // rebuild recreates the complete scheduler state from an auth snapshot.
@@ -302,9 +399,10 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
+	activePredicate := s.activeSourcePredicateLocked([]*modelScheduler{shard}, preferWebsocket, predicate)
 	bindingKey := s.stickyBindingKey(providerKey, modelKey, stickyRouteKey)
 	if s.strategy == schedulerStrategyStickyRoundRobin {
-		if picked := s.pickStickyBoundLocked(shard, preferWebsocket, pinnedAuthID, bindingKey, predicate); picked != nil {
+		if picked := s.pickStickyBoundLocked(shard, preferWebsocket, pinnedAuthID, bindingKey, activePredicate); picked != nil {
 			return picked, nil
 		}
 	}
@@ -312,11 +410,11 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	if strategy == schedulerStrategyStickyRoundRobin {
 		strategy = schedulerStrategyRoundRobin
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, activePredicate); picked != nil {
 		s.maybeRememberStickyPickLocked(providerKey, modelKey, stickyRouteKey, picked.ID, now)
 		return picked, nil
 	}
-	return nil, shard.unavailableErrorLocked(provider, model, predicate)
+	return nil, shard.unavailableErrorLocked(provider, model, activePredicate)
 }
 
 // pickMixed returns the next auth and provider for a mixed-provider request.
@@ -374,6 +472,14 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 
 	predicate := triedPredicate(tried)
 	candidateShards := make([]*modelScheduler, len(normalized))
+	for providerIndex, providerKey := range normalized {
+		providerState := s.providers[providerKey]
+		if providerState == nil {
+			continue
+		}
+		candidateShards[providerIndex] = providerState.ensureModelLocked(modelKey, now)
+	}
+	activePredicate := s.activeSourcePredicateLocked(candidateShards, false, predicate)
 	bestPriority := 0
 	hasCandidate := false
 	for providerIndex, providerKey := range normalized {
@@ -381,12 +487,11 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if providerState == nil {
 			continue
 		}
-		shard := providerState.ensureModelLocked(modelKey, now)
-		candidateShards[providerIndex] = shard
+		shard := candidateShards[providerIndex]
 		if shard == nil {
 			continue
 		}
-		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
+		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, activePredicate)
 		if !okPriority {
 			continue
 		}
@@ -401,7 +506,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 
 	if s.strategy == schedulerStrategyStickyRoundRobin {
 		bindingKey := s.stickyBindingProviderSetKey(normalized, modelKey, stickyRouteKey)
-		if picked, providerKey, ok := s.pickStickyBoundProviderLocked(candidateShards, normalized, bestPriority, bindingKey, predicate); ok {
+		if picked, providerKey, ok := s.pickStickyBoundProviderLocked(candidateShards, normalized, bestPriority, bindingKey, activePredicate); ok {
 			return picked, providerKey, nil
 		}
 	}
@@ -412,7 +517,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, activePredicate)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -428,7 +533,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	for providerIndex, shard := range candidateShards {
 		segmentStarts[providerIndex] = totalWeight
 		if shard != nil {
-			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority)
+			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority, activePredicate)
 		}
 		totalWeight += weights[providerIndex]
 		segmentEnds[providerIndex] = totalWeight
@@ -466,7 +571,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, activePredicate)
 		if picked == nil {
 			continue
 		}
@@ -829,13 +934,16 @@ func (s *authScheduler) ensureProviderLocked(providerKey string) *providerSchedu
 func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
 	virtualParent := ""
+	sourceType := authSourceType("")
 	if auth.Attributes != nil {
 		virtualParent = strings.TrimSpace(auth.Attributes["gemini_virtual_parent"])
+		sourceType = normalizeAuthSourceType(auth.Attributes["source_type"])
 	}
 	return &scheduledAuthMeta{
 		auth:              auth,
 		providerKey:       providerKey,
 		priority:          authPriority(auth),
+		sourceType:        sourceType,
 		virtualParent:     virtualParent,
 		websocketEnabled:  authWebsocketsEnabled(auth),
 		supportedModelSet: supportedModelSetForAuth(auth.ID),
@@ -1096,7 +1204,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	return picked.auth
 }
 
-func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int) int {
+func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int, predicate func(*scheduledAuth) bool) int {
 	if m == nil {
 		return 0
 	}
@@ -1105,9 +1213,9 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 		return 0
 	}
 	if preferWebsocket && len(bucket.ws.flat) > 0 {
-		return len(bucket.ws.flat)
+		return bucket.ws.count(predicate)
 	}
-	return len(bucket.all.flat)
+	return bucket.all.count(predicate)
 }
 
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
@@ -1271,6 +1379,22 @@ func (v *readyView) pickFirst(predicate func(*scheduledAuth) bool) *scheduledAut
 		}
 	}
 	return nil
+}
+
+func (v *readyView) count(predicate func(*scheduledAuth) bool) int {
+	if len(v.flat) == 0 {
+		return 0
+	}
+	if predicate == nil {
+		return len(v.flat)
+	}
+	count := 0
+	for _, entry := range v.flat {
+		if predicate(entry) {
+			count++
+		}
+	}
+	return count
 }
 
 // pickRoundRobin returns the next ready entry using flat or grouped round-robin traversal.

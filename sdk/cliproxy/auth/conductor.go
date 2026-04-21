@@ -363,6 +363,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	m.runtimeConfig.Store(cfg)
 	if m.scheduler != nil {
 		m.scheduler.setStickyTTL(cfg.Routing.StickyTTL)
+		m.scheduler.setSourcePreference(cfg.Routing.SourcePreference)
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }

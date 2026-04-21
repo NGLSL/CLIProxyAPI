@@ -955,3 +955,70 @@ func TestFileSynthesizer_Synthesize_MultiProjectGeminiWithNote(t *testing.T) {
 		}
 	}
 }
+
+func TestFileSynthesizer_Synthesize_SetsSourceTypeFile(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":  "claude",
+		"email": "file@example.com",
+	}
+	data, _ := json.Marshal(authData)
+	errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
+	if errWriteFile != nil {
+		t.Fatalf("failed to write auth file: %v", errWriteFile)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("unexpected error: %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes["source_type"]; got != "file" {
+		t.Fatalf("expected source_type file, got %q", got)
+	}
+}
+
+func TestSynthesizeGeminiVirtualAuths_InheritsFileSourceType(t *testing.T) {
+	now := time.Now()
+	primary := &coreauth.Auth{
+		ID:       "primary-id",
+		Provider: "gemini-cli",
+		Label:    "test@example.com",
+		Attributes: map[string]string{
+			"source":      "test-source",
+			"path":        "/path/to/auth",
+			"source_type": "file",
+			"priority":    "7",
+		},
+	}
+	metadata := map[string]any{
+		"project_id": "proj-a, proj-b",
+		"email":      "test@example.com",
+		"type":       "gemini",
+	}
+
+	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
+
+	if len(virtuals) != 2 {
+		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
+	}
+
+	for i, v := range virtuals {
+		if got := v.Attributes["source_type"]; got != "file" {
+			t.Fatalf("virtual %d: expected source_type file, got %q", i, got)
+		}
+		if got := v.Attributes["priority"]; got != "7" {
+			t.Fatalf("virtual %d: expected priority 7, got %q", i, got)
+		}
+	}
+}

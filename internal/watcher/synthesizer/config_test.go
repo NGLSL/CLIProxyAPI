@@ -615,3 +615,38 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigSynthesizer_SetsSourceTypeAPIForSynthesizedAuths(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{{APIKey: "gemini-key"}},
+			ClaudeKey: []config.ClaudeKey{{APIKey: "claude-key"}},
+			CodexKey:  []config.CodexKey{{APIKey: "codex-key"}},
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:    "compat",
+				BaseURL: "https://compat.example.com",
+			}},
+			VertexCompatAPIKey: []config.VertexCompatKey{{
+				APIKey:  "vertex-key",
+				BaseURL: "https://vertex.example.com",
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 5 {
+		t.Fatalf("expected 5 auths, got %d", len(auths))
+	}
+
+	for _, auth := range auths {
+		if got := auth.Attributes["source_type"]; got != "api" {
+			t.Fatalf("expected auth %s (%s) to have source_type api, got %q", auth.ID, auth.Provider, got)
+		}
+	}
+}

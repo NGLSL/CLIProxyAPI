@@ -57,8 +57,9 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		proxyURL := strings.TrimSpace(entry.ProxyURL)
 		id, token := idGen.Next("gemini:apikey", key, base)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:gemini[%s]", token),
-			"api_key": key,
+			"source":      fmt.Sprintf("config:gemini[%s]", token),
+			"source_type": "api",
+			"api_key":     key,
 		}
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
@@ -104,8 +105,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		base := strings.TrimSpace(ck.BaseURL)
 		id, token := idGen.Next("claude:apikey", key, base)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:claude[%s]", token),
-			"api_key": key,
+			"source":      fmt.Sprintf("config:claude[%s]", token),
+			"source_type": "api",
+			"api_key":     key,
 		}
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
@@ -151,8 +153,9 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		prefix := strings.TrimSpace(ck.Prefix)
 		id, token := idGen.Next("codex:apikey", key, ck.BaseURL)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:codex[%s]", token),
-			"api_key": key,
+			"source":      fmt.Sprintf("config:codex[%s]", token),
+			"source_type": "api",
+			"api_key":     key,
 		}
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
@@ -211,6 +214,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			id, token := idGen.Next(idKind, key, base, proxyURL)
 			attrs := map[string]string{
 				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+				"source_type":  "api",
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
@@ -245,6 +249,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			id, token := idGen.Next(idKind, base)
 			attrs := map[string]string{
 				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+				"source_type":  "api",
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
@@ -291,6 +296,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		id, token := idGen.Next(idKind, key, base, proxyURL)
 		attrs := map[string]string{
 			"source":       fmt.Sprintf("config:vertex-apikey[%s]", token),
+			"source_type":  "api",
 			"base_url":     base,
 			"provider_key": providerName,
 		}

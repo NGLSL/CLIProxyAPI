@@ -129,8 +129,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		Status:   status,
 		Disabled: disabled,
 		Attributes: map[string]string{
-			"source": fullPath,
-			"path":   fullPath,
+			"source":      fullPath,
+			"source_type": "file",
+			"path":        fullPath,
 		},
 		ProxyURL:  proxyURL,
 		Metadata:  metadata,
@@ -205,6 +206,7 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 	primary.Attributes["virtual_children"] = strings.Join(projects, ",")
 	source := primary.Attributes["source"]
 	authPath := primary.Attributes["path"]
+	sourceType := strings.TrimSpace(primary.Attributes["source_type"])
 	originalProvider := primary.Provider
 	if originalProvider == "" {
 		originalProvider = "gemini-cli"
@@ -225,6 +227,9 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 		}
 		if authPath != "" {
 			attrs["path"] = authPath
+		}
+		if sourceType != "" {
+			attrs["source_type"] = sourceType
 		}
 		// Propagate priority from primary auth to virtual auths
 		if priorityVal, hasPriority := primary.Attributes["priority"]; hasPriority && priorityVal != "" {
