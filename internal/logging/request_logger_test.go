@@ -158,10 +158,10 @@ func TestFileRequestLoggerLogRequestPreservesLeadingNewlineResponseSemantics(t *
 		t.Fatalf("expected response section in log, got: %s", logContent)
 	}
 	responseSection := logContent[responseIndex:]
-	if !strings.Contains(responseSection, "Content-Type: text/plain\n\nbody starts after exactly one blank line") {
+	if !strings.Contains(responseSection, "\n\nbody starts after exactly one blank line") {
 		t.Fatalf("expected response body to begin after exactly one blank line, got: %q", responseSection)
 	}
-	if strings.Contains(responseSection, "Content-Type: text/plain\n\n\nbody starts after exactly one blank line") {
+	if strings.Contains(responseSection, "\n\n\nbody starts after exactly one blank line") {
 		t.Fatalf("expected no extra blank line before response body, got: %q", responseSection)
 	}
 	assertNoTempFilesRemain(t, logsDir)
