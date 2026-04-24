@@ -55,8 +55,6 @@ type commandFlags struct {
 	codexLogin         bool
 	codexDeviceLogin   bool
 	claudeLogin        bool
-	iflowLogin         bool
-	iflowCookie        bool
 	noBrowser          bool
 	oauthCallbackPort  int
 	antigravityLogin   bool
@@ -107,8 +105,6 @@ func parseCommandFlags() commandFlags {
 	flag.BoolVar(&flagsState.codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&flagsState.codexDeviceLogin, "codex-device-login", false, "Login to Codex using device code flow")
 	flag.BoolVar(&flagsState.claudeLogin, "claude-login", false, "Login to Claude using OAuth")
-	flag.BoolVar(&flagsState.iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
-	flag.BoolVar(&flagsState.iflowCookie, "iflow-cookie", false, "Login to iFlow using Cookie")
 	flag.BoolVar(&flagsState.noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
 	flag.IntVar(&flagsState.oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&flagsState.antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
@@ -154,10 +150,6 @@ func handleCommandMode(cfg *config.Config, flagsState commandFlags, options *cmd
 		cmd.DoCodexDeviceLogin(cfg, options)
 	case flagsState.claudeLogin:
 		cmd.DoClaudeLogin(cfg, options)
-	case flagsState.iflowLogin:
-		cmd.DoIFlowLogin(cfg, options)
-	case flagsState.iflowCookie:
-		cmd.DoIFlowCookieAuth(cfg, options)
 	case flagsState.kimiLogin:
 		cmd.DoKimiLogin(cfg, options)
 	default:

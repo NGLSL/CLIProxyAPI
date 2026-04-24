@@ -1,7 +1,7 @@
 // Package thinking provides unified thinking configuration processing.
 //
 // This package offers a unified interface for parsing, validating, and applying
-// thinking configurations across various AI providers (Claude, Gemini, OpenAI, iFlow).
+// thinking configurations across various AI providers (Claude, Gemini, OpenAI, Kimi).
 package thinking
 
 import "github.com/NGLSL/CLIProxyAPI/v6/internal/registry"

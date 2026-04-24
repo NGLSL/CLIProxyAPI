@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,5 +233,26 @@ func TestGetRequestDetails_UsesResolvedModelProvidersWhenBaseModelIsMissing(t *t
 	}
 	if model != "gpt-5.4(xhigh)" {
 		t.Fatalf("getRequestDetails() model = %v, want %v", model, "gpt-5.4(xhigh)")
+	}
+}
+
+func TestGetRequestDetails_RejectsImageGenerationToolModel(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	_, _, errMsg := handler.getRequestDetails("gpt-image-2")
+	if errMsg == nil {
+		t.Fatal("expected error for gpt-image-2, got nil")
+	}
+	if errMsg.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+	}
+	if errMsg.Error == nil {
+		t.Fatal("expected underlying error")
+	}
+	if !strings.Contains(errMsg.Error.Error(), "/v1/images/generations") {
+		t.Fatalf("error = %q, want generations endpoint hint", errMsg.Error.Error())
+	}
+	if !strings.Contains(errMsg.Error.Error(), "/v1/images/edits") {
+		t.Fatalf("error = %q, want edits endpoint hint", errMsg.Error.Error())
 	}
 }
