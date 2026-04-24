@@ -51,7 +51,7 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
 func GetCodexFreeModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexFree))
+	return upsertModelInfos(cloneModelInfos(getModels().CodexFree), codexBuiltinImageModelInfo())
 }
 
 // GetCodexTeamModels returns model definitions for the Codex team plan tier.
@@ -79,9 +79,9 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
-// WithCodexBuiltins injects hard-coded Codex-only model definitions that should
-// not depend on remote models.json updates. Built-ins replace any matching IDs
-// already present in the provided slice.
+// WithCodexBuiltins injects hard-coded Codex-only model definitions for paid
+// plan tiers that should not depend on remote models.json updates. Built-ins
+// replace any matching IDs already present in the provided slice.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImageModelInfo(), codexBuiltinGPT55ModelInfo())
 }
