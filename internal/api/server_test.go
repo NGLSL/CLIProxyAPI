@@ -100,39 +100,54 @@ func newTestServer(t *testing.T) *Server {
 func TestHealthz(t *testing.T) {
 	server := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
-	rr := httptest.NewRecorder()
-	server.engine.ServeHTTP(rr, req)
+	t.Run("GET", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
-	}
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
 
-	var resp struct {
-		Status                  string `json:"status"`
-		ManagementRoutesEnabled bool   `json:"management_routes_enabled"`
-		UsageStatisticsEnabled  bool   `json:"usage_statistics_enabled"`
-		Version                 string `json:"version"`
-		BuildDate               string `json:"build_date"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
-	}
-	if resp.Status != "ok" {
-		t.Fatalf("unexpected response status: got %q want %q", resp.Status, "ok")
-	}
-	if resp.ManagementRoutesEnabled {
-		t.Fatalf("unexpected management routes state: got %t want %t", resp.ManagementRoutesEnabled, false)
-	}
-	if resp.UsageStatisticsEnabled != usage.StatisticsEnabled() {
-		t.Fatalf("unexpected usage statistics state: got %t want %t", resp.UsageStatisticsEnabled, usage.StatisticsEnabled())
-	}
-	if resp.Version == "" {
-		t.Fatal("expected version to be present in healthz response")
-	}
-	if resp.BuildDate == "" {
-		t.Fatal("expected build_date to be present in healthz response")
-	}
+		var resp struct {
+			Status                  string `json:"status"`
+			ManagementRoutesEnabled bool   `json:"management_routes_enabled"`
+			UsageStatisticsEnabled  bool   `json:"usage_statistics_enabled"`
+			Version                 string `json:"version"`
+			BuildDate               string `json:"build_date"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+		}
+		if resp.Status != "ok" {
+			t.Fatalf("unexpected response status: got %q want %q", resp.Status, "ok")
+		}
+		if resp.ManagementRoutesEnabled {
+			t.Fatalf("unexpected management routes state: got %t want %t", resp.ManagementRoutesEnabled, false)
+		}
+		if resp.UsageStatisticsEnabled != usage.StatisticsEnabled() {
+			t.Fatalf("unexpected usage statistics state: got %t want %t", resp.UsageStatisticsEnabled, usage.StatisticsEnabled())
+		}
+		if resp.Version == "" {
+			t.Fatal("expected version to be present in healthz response")
+		}
+		if resp.BuildDate == "" {
+			t.Fatal("expected build_date to be present in healthz response")
+		}
+	})
+
+	t.Run("HEAD", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodHead, "/healthz", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
+		}
+	})
 }
 
 func TestAmpProviderModelRoutes(t *testing.T) {

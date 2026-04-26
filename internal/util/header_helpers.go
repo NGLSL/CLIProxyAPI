@@ -15,13 +15,23 @@ func ApplyHeaderMapExcept(target http.Header, headers map[string]string, protect
 	applyHeaderMap(target, headers, buildProtectedHeaderSet(protectedKeys...))
 }
 
+// ApplyHeaderMapToRequest applies the provided header map to an HTTP request.
+func ApplyHeaderMapToRequest(r *http.Request, headers map[string]string) {
+	applyHeaderMapToRequest(r, headers, nil)
+}
+
+// ApplyHeaderMapToRequestExcept applies the provided header map to an HTTP request while preserving protected headers.
+func ApplyHeaderMapToRequestExcept(r *http.Request, headers map[string]string, protectedKeys ...string) {
+	applyHeaderMapToRequest(r, headers, buildProtectedHeaderSet(protectedKeys...))
+}
+
 // ApplyCustomHeadersFromAttrs applies user-defined headers stored in the provided attributes map.
 // Custom headers override existing request headers when conflicts occur.
 func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string) {
 	if r == nil {
 		return
 	}
-	ApplyHeaderMap(r.Header, extractCustomHeaders(attrs))
+	ApplyHeaderMapToRequest(r, extractCustomHeaders(attrs))
 }
 
 // ApplyCustomHeadersFromAttrsExcept applies user-defined headers while preserving protected headers.
@@ -29,7 +39,7 @@ func ApplyCustomHeadersFromAttrsExcept(r *http.Request, attrs map[string]string,
 	if r == nil {
 		return
 	}
-	ApplyHeaderMapExcept(r.Header, extractCustomHeaders(attrs), protectedKeys...)
+	ApplyHeaderMapToRequestExcept(r, extractCustomHeaders(attrs), protectedKeys...)
 }
 
 func extractCustomHeaders(attrs map[string]string) map[string]string {
@@ -92,5 +102,29 @@ func applyHeaderMap(target http.Header, headers map[string]string, protected map
 			continue
 		}
 		target.Set(canonical, val)
+	}
+}
+
+func applyHeaderMapToRequest(r *http.Request, headers map[string]string, protected map[string]struct{}) {
+	if r == nil || len(headers) == 0 {
+		return
+	}
+	for k, v := range headers {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(k))
+		if canonical == "" {
+			continue
+		}
+		val := strings.TrimSpace(v)
+		if val == "" {
+			continue
+		}
+		if _, blocked := protected[canonical]; blocked {
+			continue
+		}
+		if canonical == "Host" {
+			r.Host = val
+			continue
+		}
+		r.Header.Set(canonical, val)
 	}
 }

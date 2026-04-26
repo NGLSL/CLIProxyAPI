@@ -21,6 +21,8 @@ const (
 	ExecutionSessionMetadataKey = "execution_session_id"
 	// StickyRouteMetadataKey carries the caller-scoped sticky routing key for built-in affinity.
 	StickyRouteMetadataKey = "sticky_route_key"
+	// DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
+	DisallowFreeAuthMetadataKey = "disallow_free_auth"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.

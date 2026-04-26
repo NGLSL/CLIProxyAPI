@@ -58,14 +58,14 @@ func (e *OpenAICompatExecutor) applyConfigHeaders(req *http.Request, auth *clipr
 	if compat == nil || len(compat.Headers) == 0 {
 		return
 	}
-	util.ApplyHeaderMapExcept(req.Header, compat.Headers, "Authorization")
+	util.ApplyHeaderMapToRequestExcept(req, compat.Headers, "Authorization")
 }
 
 func (e *OpenAICompatExecutor) applyGlobalForwardHeaders(req *http.Request) {
 	if req == nil || e == nil || e.cfg == nil {
 		return
 	}
-	util.ApplyHeaderMapExcept(req.Header, e.cfg.ForwardRequestHeaders, "Authorization")
+	util.ApplyHeaderMapToRequestExcept(req, e.cfg.ForwardRequestHeaders, "Authorization")
 }
 
 func (e *OpenAICompatExecutor) applyAuthHeaders(req *http.Request, auth *cliproxyauth.Auth) {
@@ -613,6 +613,9 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 	}
 	for i := range e.cfg.OpenAICompatibility {
 		compat := &e.cfg.OpenAICompatibility[i]
+		if compat.Disabled {
+			continue
+		}
 		for _, candidate := range candidates {
 			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
 				return compat

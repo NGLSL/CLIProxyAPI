@@ -47,6 +47,18 @@ func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 	r.publishWithOutcome(ctx, detail, false)
 }
 
+func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
+	if r == nil {
+		return
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	detail = normalizeUsageDetailTotal(detail)
+	usage.PublishRecord(ctx, r.buildRecordForModel(ctx, model, detail, false))
+}
+
 func (r *UsageReporter) PublishFailure(ctx context.Context) {
 	r.publishWithOutcome(ctx, usage.Detail{}, true)
 }
@@ -64,15 +76,20 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	if r == nil {
 		return
 	}
+	detail = normalizeUsageDetailTotal(detail)
+	r.once.Do(func() {
+		usage.PublishRecord(ctx, r.buildRecord(ctx, detail, failed))
+	})
+}
+
+func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
 	if detail.TotalTokens == 0 {
 		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
 		if total > 0 {
 			detail.TotalTokens = total
 		}
 	}
-	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(ctx, detail, failed))
-	})
+	return detail
 }
 
 // ensurePublished guarantees that a usage record is emitted exactly once.
@@ -92,10 +109,17 @@ func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, fa
 	if r == nil {
 		return usage.Record{Detail: detail, Failed: failed}
 	}
+	return r.buildRecordForModel(ctx, r.model, detail, failed)
+}
+
+func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, detail usage.Detail, failed bool) usage.Record {
+	if r == nil {
+		return usage.Record{Model: model, Detail: detail, Failed: failed}
+	}
 	metrics := internalusage.SnapshotRequestMetrics(ctx)
 	return usage.Record{
 		Provider:         r.provider,
-		Model:            r.model,
+		Model:            model,
 		Source:           r.source,
 		APIKey:           r.apiKey,
 		AuthID:           r.authID,
@@ -233,18 +257,15 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
-	detail := usage.Detail{
-		InputTokens:  usageNode.Get("input_tokens").Int(),
-		OutputTokens: usageNode.Get("output_tokens").Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
+	return parseOpenAIStyleUsageNode(usageNode), true
+}
+
+func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
+	usageNode := gjson.ParseBytes(data).Get("response.tool_usage.image_gen")
+	if !usageNode.Exists() || !usageNode.IsObject() {
+		return usage.Detail{}, false
 	}
-	if cached := usageNode.Get("input_tokens_details.cached_tokens"); cached.Exists() {
-		detail.CachedTokens = cached.Int()
-	}
-	if reasoning := usageNode.Get("output_tokens_details.reasoning_tokens"); reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
-	}
-	return detail, true
+	return parseOpenAIStyleUsageNode(usageNode), true
 }
 
 func ParseOpenAIUsage(data []byte) usage.Detail {
@@ -252,6 +273,10 @@ func ParseOpenAIUsage(data []byte) usage.Detail {
 	if !usageNode.Exists() {
 		return usage.Detail{}
 	}
+	return parseOpenAIStyleUsageNode(usageNode)
+}
+
+func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	inputNode := usageNode.Get("prompt_tokens")
 	if !inputNode.Exists() {
 		inputNode = usageNode.Get("input_tokens")

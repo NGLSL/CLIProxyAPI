@@ -67,3 +67,34 @@ func TestApplyCustomHeadersFromAttrsExcept_AllowsOverridesWhenNotProtected(t *te
 		t.Fatalf("User-Agent = %q, want %q", got, "override-ua")
 	}
 }
+
+func TestApplyCustomHeadersFromAttrs_SetsRequestHost(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	ApplyCustomHeadersFromAttrs(req, map[string]string{
+		"header:Host": "upstream.example.com",
+	})
+
+	if got := req.Host; got != "upstream.example.com" {
+		t.Fatalf("Host = %q, want %q", got, "upstream.example.com")
+	}
+}
+
+func TestApplyHeaderMapToRequestExcept_ProtectsHost(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Host = "existing.example.com"
+
+	ApplyHeaderMapToRequestExcept(req, map[string]string{
+		"Host": "override.example.com",
+	}, "host")
+
+	if got := req.Host; got != "existing.example.com" {
+		t.Fatalf("Host = %q, want %q", got, "existing.example.com")
+	}
+}

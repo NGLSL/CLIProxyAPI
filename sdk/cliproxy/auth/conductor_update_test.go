@@ -2,9 +2,49 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
+
+	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
+
+type ineffectiveRefreshExecutor struct {
+	provider string
+}
+
+func (e ineffectiveRefreshExecutor) Identifier() string { return e.provider }
+
+func (e ineffectiveRefreshExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e ineffectiveRefreshExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e ineffectiveRefreshExecutor) Refresh(context.Context, *Auth) (*Auth, error) {
+	// Intentionally return refresh metadata that still evaluates as expired after a
+	// successful refresh. This reproduces the ineffective-refresh loop that should
+	// now be throttled by refreshIneffectiveBackoff.
+	return &Auth{
+		ID:       "auth-refresh-ineffective",
+		Provider: e.provider,
+		Metadata: map[string]any{
+			"email":                    "x@example.com",
+			"refresh_interval_seconds": 3600,
+			"expires_at":               time.Now().Add(-time.Minute).Format(time.RFC3339),
+		},
+	}, nil
+}
+
+func (e ineffectiveRefreshExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e ineffectiveRefreshExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
 
 func TestManager_Update_PreservesModelStates(t *testing.T) {
 	m := NewManager(nil, nil, nil)
@@ -219,5 +259,41 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 	}
 	if state.Quota.BackoffLevel != backoffLevel {
 		t.Fatalf("expected BackoffLevel to be %d, got %d", backoffLevel, state.Quota.BackoffLevel)
+	}
+}
+
+func TestManager_RefreshAuth_SetsBackoffWhenRefreshIsIneffective(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := ineffectiveRefreshExecutor{provider: "claude"}
+	m.RegisterExecutor(executor)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:       "auth-refresh-ineffective",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"email":                    "x@example.com",
+			"refresh_interval_seconds": 3600,
+			"expires_at":               time.Now().Add(-time.Minute).Format(time.RFC3339),
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	startedAt := time.Now()
+	m.refreshAuth(context.Background(), "auth-refresh-ineffective")
+	finishedAt := time.Now()
+
+	updated, ok := m.GetByID("auth-refresh-ineffective")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present after refresh")
+	}
+	if updated.NextRefreshAfter.IsZero() {
+		t.Fatal("expected NextRefreshAfter to be set for ineffective refresh")
+	}
+
+	minWant := startedAt.Add(refreshIneffectiveBackoff)
+	maxWant := finishedAt.Add(refreshIneffectiveBackoff)
+	if updated.NextRefreshAfter.Before(minWant) || updated.NextRefreshAfter.After(maxWant) {
+		t.Fatalf("expected NextRefreshAfter in [%s, %s], got %s", minWant, maxWant, updated.NextRefreshAfter)
 	}
 }

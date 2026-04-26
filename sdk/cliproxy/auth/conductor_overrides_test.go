@@ -621,6 +621,62 @@ func TestManager_Execute_DisableCooling_DoesNotBlackoutAfter403(t *testing.T) {
 	}
 }
 
+func TestManager_ExecuteStream_Bootstrap429AfterRetryReturnsStreamResult(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(1, 2*time.Second, 0)
+
+	executor := &authFallbackExecutor{
+		id: "antigravity",
+		streamFirstErrors: map[string]error{
+			"ag-stream-bootstrap-429": &Error{
+				HTTPStatus: http.StatusTooManyRequests,
+				Message:    "quota exhausted",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{ID: "ag-stream-bootstrap-429", Provider: "antigravity"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "claude-opus-4-6-thinking"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute stream error = %v, want stream result", errExecute)
+	}
+	if streamResult == nil {
+		t.Fatal("execute stream result = nil")
+	}
+	if got := streamResult.Headers.Get("X-Auth"); got != auth.ID {
+		t.Fatalf("X-Auth header = %q, want %q", got, auth.ID)
+	}
+
+	var streamErr error
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+			break
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("expected stream error chunk")
+	}
+	if status := statusCodeFromError(streamErr); status != http.StatusTooManyRequests {
+		t.Fatalf("stream error status = %d, want %d", status, http.StatusTooManyRequests)
+	}
+
+	calls := executor.StreamCalls()
+	if len(calls) != 2 {
+		t.Fatalf("stream calls = %d, want 2", len(calls))
+	}
+}
+
 func TestManager_Execute_DisableCooling_DoesNotBlackoutAfter429RetryAfter(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
