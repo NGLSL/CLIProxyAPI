@@ -774,6 +774,45 @@ func (s *authScheduler) pickStickyBoundProviderLocked(candidateShards []*modelSc
 	return picked, providerKey, true
 }
 
+func (s *authScheduler) pickLegacyStickyBoundLocked(bindingKey string, available []*Auth, now time.Time) *Auth {
+	if s == nil || s.strategy != schedulerStrategyStickyRoundRobin || bindingKey == "" || len(available) == 0 {
+		return nil
+	}
+	stickyAuthID := s.lookupStickyAuthIDLocked(bindingKey, now)
+	if stickyAuthID == "" {
+		return nil
+	}
+	for _, auth := range available {
+		if auth == nil || auth.ID != stickyAuthID {
+			continue
+		}
+		s.rememberStickyAuthLocked(bindingKey, auth.ID, now)
+		return auth
+	}
+	return nil
+}
+
+func (s *authScheduler) pickLegacyStickyBound(bindingKey string, available []*Auth, now time.Time) *Auth {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pickLegacyStickyBoundLocked(bindingKey, available, now)
+}
+
+func (s *authScheduler) rememberLegacyStickyPick(bindingKey, authID string, now time.Time) {
+	if s == nil || bindingKey == "" || authID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.strategy != schedulerStrategyStickyRoundRobin {
+		return
+	}
+	s.rememberStickyAuthLocked(bindingKey, authID, now)
+}
+
 func (s *authScheduler) clearExpiredStickyBindingsLocked(now time.Time) {
 	if s == nil || len(s.stickyBindings) == 0 {
 		return

@@ -2638,6 +2638,7 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	stickyRouteKey := stickyRouteKeyFromMetadata(opts.Metadata)
 
 	m.mu.RLock()
 	executor, okExecutor := m.executors[provider]
@@ -2677,10 +2678,28 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now())
+	now := time.Now()
+	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, now)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
+	}
+	bindingKey := ""
+	if m.scheduler != nil {
+		bindingKey = m.scheduler.stickyBindingKey(provider, model, stickyRouteKey)
+		if selected := m.scheduler.pickLegacyStickyBound(bindingKey, available, now); selected != nil {
+			authCopy := selected.Clone()
+			m.mu.RUnlock()
+			if !selected.indexAssigned {
+				m.mu.Lock()
+				if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+					current.EnsureIndex()
+					authCopy = current.Clone()
+				}
+				m.mu.Unlock()
+			}
+			return authCopy, executor, nil
+		}
 	}
 	selected, errPick := m.selector.Pick(ctx, provider, selectionArgForSelector(m.selector, model), opts, available)
 	if errPick != nil {
@@ -2690,6 +2709,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	if selected == nil {
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	if m.scheduler != nil && bindingKey != "" {
+		m.scheduler.rememberLegacyStickyPick(bindingKey, selected.ID, now)
 	}
 	authCopy := selected.Clone()
 	m.mu.RUnlock()
@@ -2767,6 +2789,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	stickyRouteKey := stickyRouteKeyFromMetadata(opts.Metadata)
 
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
@@ -2823,10 +2846,34 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
+	now := time.Now()
+	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, now)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable
+	}
+	bindingKey := ""
+	if m.scheduler != nil {
+		bindingKey = m.scheduler.stickyBindingProviderSetKey(normalizeProviderKeys(providers), model, stickyRouteKey)
+		if selected := m.scheduler.pickLegacyStickyBound(bindingKey, available, now); selected != nil {
+			providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
+			executor, okExecutor := m.executors[providerKey]
+			if !okExecutor {
+				m.mu.RUnlock()
+				return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+			}
+			authCopy := selected.Clone()
+			m.mu.RUnlock()
+			if !selected.indexAssigned {
+				m.mu.Lock()
+				if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+					current.EnsureIndex()
+					authCopy = current.Clone()
+				}
+				m.mu.Unlock()
+			}
+			return authCopy, executor, providerKey, nil
+		}
 	}
 	selected, errPick := m.selector.Pick(ctx, "mixed", selectionArgForSelector(m.selector, model), opts, available)
 	if errPick != nil {
@@ -2842,6 +2889,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if !okExecutor {
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+	if m.scheduler != nil && bindingKey != "" {
+		m.scheduler.rememberLegacyStickyPick(bindingKey, selected.ID, now)
 	}
 	authCopy := selected.Clone()
 	m.mu.RUnlock()
