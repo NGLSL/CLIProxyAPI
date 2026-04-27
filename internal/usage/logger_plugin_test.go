@@ -208,6 +208,87 @@ func TestRequestStatisticsRecordTrimsDetailsButKeepsAggregateTotals(t *testing.T
 	}
 }
 
+func TestRequestStatisticsRestoreSnapshotKeepsAggregateTotalsBeyondDetailWindow(t *testing.T) {
+	stats := NewRequestStatistics()
+	baseTime := time.Date(2026, 3, 21, 8, 0, 0, 0, time.UTC)
+
+	var expectedTotalTokens int64
+	var expectedSuccessCount int64
+	var expectedFailureCount int64
+
+	for i := 0; i < maxRequestDetailsPerModel+25; i++ {
+		failed := i%3 == 0
+		tokens := int64(i + 1)
+		expectedTotalTokens += tokens
+		if failed {
+			expectedFailureCount++
+		} else {
+			expectedSuccessCount++
+		}
+
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      "restore-key",
+			Model:       "gpt-5.4",
+			RequestedAt: baseTime.Add(time.Duration(i) * time.Minute),
+			Failed:      failed,
+			Source:      fmt.Sprintf("restore-source-%d", i),
+			AuthIndex:   fmt.Sprintf("restore-auth-%d", i),
+			Detail: coreusage.Detail{
+				InputTokens: tokens,
+				TotalTokens: tokens,
+			},
+		})
+	}
+
+	persisted := stats.Snapshot()
+	restoredStats := NewRequestStatistics()
+	result := restoredStats.RestoreSnapshot(persisted)
+	if result.Requests != int64(maxRequestDetailsPerModel+25) {
+		t.Fatalf("restore requests = %d, want %d", result.Requests, maxRequestDetailsPerModel+25)
+	}
+	if result.Details != int64(maxRequestDetailsPerModel) {
+		t.Fatalf("restore details = %d, want %d", result.Details, maxRequestDetailsPerModel)
+	}
+
+	restored := restoredStats.Snapshot()
+	apiSnapshot := restored.APIs["restore-key"]
+	modelSnapshot := apiSnapshot.Models["gpt-5.4"]
+
+	if restored.TotalRequests != int64(maxRequestDetailsPerModel+25) {
+		t.Fatalf("total requests = %d, want %d", restored.TotalRequests, maxRequestDetailsPerModel+25)
+	}
+	if restored.SuccessCount != expectedSuccessCount {
+		t.Fatalf("success count = %d, want %d", restored.SuccessCount, expectedSuccessCount)
+	}
+	if restored.FailureCount != expectedFailureCount {
+		t.Fatalf("failure count = %d, want %d", restored.FailureCount, expectedFailureCount)
+	}
+	if restored.TotalTokens != expectedTotalTokens {
+		t.Fatalf("total tokens = %d, want %d", restored.TotalTokens, expectedTotalTokens)
+	}
+	if restored.RequestsByDay["2026-03-21"] != int64(maxRequestDetailsPerModel+25) {
+		t.Fatalf("requests by day = %d, want %d", restored.RequestsByDay["2026-03-21"], maxRequestDetailsPerModel+25)
+	}
+	if restored.TokensByDay["2026-03-21"] != expectedTotalTokens {
+		t.Fatalf("tokens by day = %d, want %d", restored.TokensByDay["2026-03-21"], expectedTotalTokens)
+	}
+	if apiSnapshot.TotalRequests != int64(maxRequestDetailsPerModel+25) {
+		t.Fatalf("api total requests = %d, want %d", apiSnapshot.TotalRequests, maxRequestDetailsPerModel+25)
+	}
+	if apiSnapshot.TotalTokens != expectedTotalTokens {
+		t.Fatalf("api total tokens = %d, want %d", apiSnapshot.TotalTokens, expectedTotalTokens)
+	}
+	if modelSnapshot.TotalRequests != int64(maxRequestDetailsPerModel+25) {
+		t.Fatalf("model total requests = %d, want %d", modelSnapshot.TotalRequests, maxRequestDetailsPerModel+25)
+	}
+	if modelSnapshot.TotalTokens != expectedTotalTokens {
+		t.Fatalf("model total tokens = %d, want %d", modelSnapshot.TotalTokens, expectedTotalTokens)
+	}
+	if got := len(modelSnapshot.Details); got != maxRequestDetailsPerModel {
+		t.Fatalf("details len = %d, want %d", got, maxRequestDetailsPerModel)
+	}
+}
+
 func TestRequestStatisticsMergeSnapshotNormalisesRequestMetricFields(t *testing.T) {
 	stats := NewRequestStatistics()
 	result := stats.MergeSnapshot(StatisticsSnapshot{

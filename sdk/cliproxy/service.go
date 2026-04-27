@@ -249,9 +249,19 @@ func (s *Service) restoreUsageSnapshot() {
 		return
 	}
 
-	result := internalusage.GetRequestStatistics().MergeSnapshot(snapshot)
+	stats := internalusage.GetRequestStatistics()
+	current := stats.Snapshot()
+	if current.TotalRequests == 0 && len(current.APIs) == 0 {
+		result := stats.RestoreSnapshot(snapshot)
+		if result.Requests > 0 || result.Details > 0 {
+			log.Infof("restored usage snapshot from %s (requests=%d details=%d)", path, result.Requests, result.Details)
+		}
+		return
+	}
+
+	result := stats.MergeSnapshot(snapshot)
 	if result.Added > 0 || result.Skipped > 0 {
-		log.Infof("restored usage snapshot from %s (added=%d skipped=%d)", path, result.Added, result.Skipped)
+		log.Infof("merged usage snapshot from %s (added=%d skipped=%d)", path, result.Added, result.Skipped)
 	}
 }
 

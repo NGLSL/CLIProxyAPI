@@ -145,16 +145,23 @@ func TestServiceRestoreUsageSnapshotMergesPersistedData(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	snapshotPath := internalusage.DefaultSnapshotPath(configPath)
 	stats := internalusage.NewRequestStatistics()
-	stats.Record(context.Background(), coreusage.Record{
-		APIKey:      "restore-key",
-		Model:       "gpt-5.4",
-		RequestedAt: time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC),
-		Detail: coreusage.Detail{
-			InputTokens:  10,
-			OutputTokens: 20,
-			TotalTokens:  30,
-		},
-	})
+	baseTime := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+
+	var expectedTotalTokens int64
+	for i := 0; i < 225; i++ {
+		tokens := int64(i + 1)
+		expectedTotalTokens += tokens
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      "restore-key",
+			Model:       "gpt-5.4",
+			RequestedAt: baseTime.Add(time.Duration(i) * time.Minute),
+			Source:      "restore-source",
+			Detail: coreusage.Detail{
+				InputTokens: tokens,
+				TotalTokens: tokens,
+			},
+		})
+	}
 	if err := internalusage.SaveRequestStatisticsToFile(snapshotPath, stats); err != nil {
 		t.Fatalf("SaveRequestStatisticsToFile() error = %v", err)
 	}
@@ -163,14 +170,28 @@ func TestServiceRestoreUsageSnapshotMergesPersistedData(t *testing.T) {
 	service.restoreUsageSnapshot()
 
 	snapshot := internalusage.GetRequestStatistics().Snapshot()
-	if snapshot.TotalRequests != 1 {
-		t.Fatalf("total requests = %d, want 1", snapshot.TotalRequests)
+	if snapshot.TotalRequests != 225 {
+		t.Fatalf("total requests = %d, want 225", snapshot.TotalRequests)
 	}
-	if snapshot.TotalTokens != 30 {
-		t.Fatalf("total tokens = %d, want 30", snapshot.TotalTokens)
+	if snapshot.TotalTokens != expectedTotalTokens {
+		t.Fatalf("total tokens = %d, want %d", snapshot.TotalTokens, expectedTotalTokens)
 	}
-	if got := len(snapshot.APIs["restore-key"].Models["gpt-5.4"].Details); got != 1 {
-		t.Fatalf("details len = %d, want 1", got)
+	apiSnapshot := snapshot.APIs["restore-key"]
+	if apiSnapshot.TotalRequests != 225 {
+		t.Fatalf("api total requests = %d, want 225", apiSnapshot.TotalRequests)
+	}
+	if apiSnapshot.TotalTokens != expectedTotalTokens {
+		t.Fatalf("api total tokens = %d, want %d", apiSnapshot.TotalTokens, expectedTotalTokens)
+	}
+	modelSnapshot := apiSnapshot.Models["gpt-5.4"]
+	if modelSnapshot.TotalRequests != 225 {
+		t.Fatalf("model total requests = %d, want 225", modelSnapshot.TotalRequests)
+	}
+	if modelSnapshot.TotalTokens != expectedTotalTokens {
+		t.Fatalf("model total tokens = %d, want %d", modelSnapshot.TotalTokens, expectedTotalTokens)
+	}
+	if got := len(modelSnapshot.Details); got != 200 {
+		t.Fatalf("details len = %d, want 200", got)
 	}
 }
 

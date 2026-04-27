@@ -6,6 +6,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -324,6 +325,244 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 type MergeResult struct {
 	Added   int64 `json:"added"`
 	Skipped int64 `json:"skipped"`
+}
+
+type RestoreResult struct {
+	Requests int64 `json:"requests"`
+	Details  int64 `json:"details"`
+}
+
+// RestoreSnapshot replaces the current store with a persisted snapshot.
+// It preserves persisted aggregate totals even when request details were trimmed.
+func (s *RequestStatistics) RestoreSnapshot(snapshot StatisticsSnapshot) RestoreResult {
+	result := RestoreResult{}
+	if s == nil {
+		return result
+	}
+
+	restored := buildRestoredStatistics(snapshot)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.totalRequests = restored.totalRequests
+	s.successCount = restored.successCount
+	s.failureCount = restored.failureCount
+	s.totalTokens = restored.totalTokens
+	s.apis = restored.apis
+	s.requestsByDay = restored.requestsByDay
+	s.requestsByHour = restored.requestsByHour
+	s.tokensByDay = restored.tokensByDay
+	s.tokensByHour = restored.tokensByHour
+
+	result.Requests = restored.totalRequests
+	result.Details = restored.detailCount
+	return result
+}
+
+type restoredStatistics struct {
+	totalRequests int64
+	successCount  int64
+	failureCount  int64
+	totalTokens   int64
+	detailCount   int64
+
+	apis map[string]*apiStats
+
+	requestsByDay  map[string]int64
+	requestsByHour map[int]int64
+	tokensByDay    map[string]int64
+	tokensByHour   map[int]int64
+}
+
+func buildRestoredStatistics(snapshot StatisticsSnapshot) restoredStatistics {
+	restored := restoredStatistics{
+		apis:           make(map[string]*apiStats),
+		requestsByDay:  copyNonNegativeStringMap(snapshot.RequestsByDay),
+		requestsByHour: copyNonNegativeHourMap(snapshot.RequestsByHour),
+		tokensByDay:    copyNonNegativeStringMap(snapshot.TokensByDay),
+		tokensByHour:   copyNonNegativeHourMap(snapshot.TokensByHour),
+	}
+
+	detailRequestsByDay := make(map[string]int64)
+	detailRequestsByHour := make(map[int]int64)
+	detailTokensByDay := make(map[string]int64)
+	detailTokensByHour := make(map[int]int64)
+
+	var apiTotalRequests int64
+	var apiTotalTokens int64
+	var detailSuccessCount int64
+	var detailFailureCount int64
+
+	for apiName, apiSnapshot := range snapshot.APIs {
+		apiName = strings.TrimSpace(apiName)
+		if apiName == "" {
+			continue
+		}
+
+		api := &apiStats{Models: make(map[string]*modelStats)}
+		var modelTotalRequests int64
+		var modelTotalTokens int64
+
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			modelName = strings.TrimSpace(modelName)
+			if modelName == "" {
+				modelName = "unknown"
+			}
+
+			modelStatsValue, detailRequests, detailTokens, successCount, failureCount := restoreModelSnapshot(modelSnapshot, detailRequestsByDay, detailRequestsByHour, detailTokensByDay, detailTokensByHour)
+			restored.detailCount += int64(len(modelStatsValue.Details))
+			detailSuccessCount += successCount
+			detailFailureCount += failureCount
+
+			modelStatsValue.TotalRequests = maxNonNegative(modelSnapshot.TotalRequests, detailRequests)
+			modelStatsValue.TotalTokens = maxNonNegative(modelSnapshot.TotalTokens, detailTokens)
+			api.Models[modelName] = modelStatsValue
+
+			modelTotalRequests += modelStatsValue.TotalRequests
+			modelTotalTokens += modelStatsValue.TotalTokens
+		}
+
+		api.TotalRequests = maxNonNegative(apiSnapshot.TotalRequests, modelTotalRequests)
+		api.TotalTokens = maxNonNegative(apiSnapshot.TotalTokens, modelTotalTokens)
+		restored.apis[apiName] = api
+
+		apiTotalRequests += api.TotalRequests
+		apiTotalTokens += api.TotalTokens
+	}
+
+	restored.totalRequests = maxNonNegative(snapshot.TotalRequests, apiTotalRequests)
+	restored.totalTokens = maxNonNegative(snapshot.TotalTokens, apiTotalTokens)
+	restored.successCount = maxNonNegative(snapshot.SuccessCount, detailSuccessCount)
+	restored.failureCount = maxNonNegative(snapshot.FailureCount, detailFailureCount)
+	if restored.successCount+restored.failureCount < restored.totalRequests {
+		restored.successCount += restored.totalRequests - restored.successCount - restored.failureCount
+	}
+	if restored.successCount+restored.failureCount > restored.totalRequests {
+		restored.totalRequests = restored.successCount + restored.failureCount
+	}
+
+	mergeMaxStringMap(restored.requestsByDay, detailRequestsByDay)
+	mergeMaxHourMap(restored.requestsByHour, detailRequestsByHour)
+	mergeMaxStringMap(restored.tokensByDay, detailTokensByDay)
+	mergeMaxHourMap(restored.tokensByHour, detailTokensByHour)
+
+	return restored
+}
+
+func restoreModelSnapshot(
+	modelSnapshot ModelSnapshot,
+	detailRequestsByDay map[string]int64,
+	detailRequestsByHour map[int]int64,
+	detailTokensByDay map[string]int64,
+	detailTokensByHour map[int]int64,
+) (*modelStats, int64, int64, int64, int64) {
+	details := make([]RequestDetail, 0, len(modelSnapshot.Details))
+	var detailRequests int64
+	var detailTokens int64
+	var successCount int64
+	var failureCount int64
+
+	for _, detail := range modelSnapshot.Details {
+		detail = normaliseRestoredDetail(detail)
+		tokens := normaliseNonNegative(detail.Tokens.TotalTokens)
+		details = append(details, detail)
+		detailRequests++
+		detailTokens += tokens
+		if detail.Failed {
+			failureCount++
+		} else {
+			successCount++
+		}
+
+		dayKey := detail.Timestamp.Format("2006-01-02")
+		hourKey := detail.Timestamp.Hour()
+		detailRequestsByDay[dayKey]++
+		detailRequestsByHour[hourKey]++
+		detailTokensByDay[dayKey] += tokens
+		detailTokensByHour[hourKey] += tokens
+	}
+
+	if len(details) > maxRequestDetailsPerModel {
+		details = details[len(details)-maxRequestDetailsPerModel:]
+	}
+
+	return &modelStats{Details: details}, detailRequests, detailTokens, successCount, failureCount
+}
+
+func normaliseRestoredDetail(detail RequestDetail) RequestDetail {
+	detail.Tokens = normaliseTokenStats(detail.Tokens)
+	detail.Tokens.InputTokens = normaliseNonNegative(detail.Tokens.InputTokens)
+	detail.Tokens.OutputTokens = normaliseNonNegative(detail.Tokens.OutputTokens)
+	detail.Tokens.ReasoningTokens = normaliseNonNegative(detail.Tokens.ReasoningTokens)
+	detail.Tokens.CachedTokens = normaliseNonNegative(detail.Tokens.CachedTokens)
+	detail.Tokens.TotalTokens = normaliseNonNegative(detail.Tokens.TotalTokens)
+	if detail.LatencyMs < 0 {
+		detail.LatencyMs = 0
+	}
+	detail.ChunkCount = normaliseNonNegative(detail.ChunkCount)
+	detail.ResponseBytes = normaliseNonNegative(detail.ResponseBytes)
+	detail.APIResponseBytes = normaliseNonNegative(detail.APIResponseBytes)
+	if detail.Timestamp.IsZero() {
+		detail.Timestamp = time.Now()
+	}
+	return detail
+}
+
+func maxNonNegative(value, minimum int64) int64 {
+	value = normaliseNonNegative(value)
+	if value < minimum {
+		return minimum
+	}
+	return value
+}
+
+func copyNonNegativeStringMap(source map[string]int64) map[string]int64 {
+	result := make(map[string]int64, len(source))
+	for key, value := range source {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		result[key] = normaliseNonNegative(value)
+	}
+	return result
+}
+
+func copyNonNegativeHourMap(source map[string]int64) map[int]int64 {
+	result := make(map[int]int64, len(source))
+	for key, value := range source {
+		hour, ok := parseHourKey(key)
+		if !ok {
+			continue
+		}
+		result[hour] = normaliseNonNegative(value)
+	}
+	return result
+}
+
+func parseHourKey(key string) (int, bool) {
+	hour, err := strconv.Atoi(strings.TrimSpace(key))
+	if err != nil || hour < 0 {
+		return 0, false
+	}
+	return hour % 24, true
+}
+
+func mergeMaxStringMap(target, source map[string]int64) {
+	for key, value := range source {
+		if target[key] < value {
+			target[key] = value
+		}
+	}
+}
+
+func mergeMaxHourMap(target, source map[int]int64) {
+	for key, value := range source {
+		if target[key] < value {
+			target[key] = value
+		}
+	}
 }
 
 // MergeSnapshot merges an exported statistics snapshot into the current store.
