@@ -47,6 +47,82 @@ func extractResponsesReasoningText(item gjson.Result) string {
 	return strings.Join(parts, "\n")
 }
 
+func responsesInputItemType(item gjson.Result) string {
+	itemType := item.Get("type").String()
+	if itemType == "" && item.Get("role").String() != "" {
+		itemType = "message"
+	}
+	return itemType
+}
+
+func responsesCallID(item gjson.Result) string {
+	return strings.TrimSpace(item.Get("call_id").String())
+}
+
+func buildResponsesToolCall(item gjson.Result) []byte {
+	toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+	if callID := responsesCallID(item); callID != "" {
+		toolCall, _ = sjson.SetBytes(toolCall, "id", callID)
+	}
+	if name := item.Get("name"); name.Exists() {
+		toolCall, _ = sjson.SetBytes(toolCall, "function.name", name.String())
+	}
+	if arguments := item.Get("arguments"); arguments.Exists() {
+		toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
+	}
+	return toolCall
+}
+
+func buildResponsesToolMessage(item gjson.Result) []byte {
+	toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
+	if callID := responsesCallID(item); callID != "" {
+		toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
+	}
+	if output := item.Get("output"); output.Exists() {
+		toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
+	}
+	return toolMessage
+}
+
+func appendResponsesToolCallGroup(out []byte, calls, outputs []gjson.Result, reasoningContent string) []byte {
+	outputCallIDs := make(map[string]struct{}, len(outputs))
+	for _, output := range outputs {
+		if callID := responsesCallID(output); callID != "" {
+			outputCallIDs[callID] = struct{}{}
+		}
+	}
+
+	assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+	pairedCallIDs := make(map[string]struct{}, len(calls))
+	for _, call := range calls {
+		callID := responsesCallID(call)
+		if callID == "" {
+			continue
+		}
+		if _, ok := outputCallIDs[callID]; !ok {
+			continue
+		}
+		assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.-1", buildResponsesToolCall(call))
+		pairedCallIDs[callID] = struct{}{}
+	}
+	if len(pairedCallIDs) == 0 {
+		return out
+	}
+	if reasoningContent != "" {
+		assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+	}
+	out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
+
+	for _, output := range outputs {
+		callID := responsesCallID(output)
+		if _, ok := pairedCallIDs[callID]; !ok {
+			continue
+		}
+		out, _ = sjson.SetRawBytes(out, "messages.-1", buildResponsesToolMessage(output))
+	}
+	return out
+}
+
 // ConvertOpenAIResponsesRequestToOpenAIChatCompletions converts OpenAI responses format to OpenAI chat completions format.
 // It transforms the OpenAI responses API format (with instructions and input array) into the standard
 // OpenAI chat completions format (with messages array and system content).
@@ -114,11 +190,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		pendingReasoningContent := ""
-		input.ForEach(func(_, item gjson.Result) bool {
-			itemType := item.Get("type").String()
-			if itemType == "" && item.Get("role").String() != "" {
-				itemType = "message"
-			}
+		items := input.Array()
+		for i := 0; i < len(items); i++ {
+			item := items[i]
+			itemType := responsesInputItemType(item)
 
 			switch itemType {
 			case "reasoning":
@@ -172,47 +247,27 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
 
 			case "function_call":
-				// Handle function call conversion to assistant message with tool_calls
-				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
-
-				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-
-				if callId := item.Get("call_id"); callId.Exists() {
-					toolCall, _ = sjson.SetBytes(toolCall, "id", callId.String())
+				var calls []gjson.Result
+				for i < len(items) && responsesInputItemType(items[i]) == "function_call" {
+					calls = append(calls, items[i])
+					i++
 				}
 
-				if name := item.Get("name"); name.Exists() {
-					toolCall, _ = sjson.SetBytes(toolCall, "function.name", name.String())
+				var outputs []gjson.Result
+				for i < len(items) && responsesInputItemType(items[i]) == "function_call_output" {
+					outputs = append(outputs, items[i])
+					i++
 				}
+				i--
 
-				if arguments := item.Get("arguments"); arguments.Exists() {
-					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
-				}
-
-				if pendingReasoningContent != "" {
-					assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", pendingReasoningContent)
-					pendingReasoningContent = ""
-				}
-				assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.0", toolCall)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
+				out = appendResponsesToolCallGroup(out, calls, outputs, pendingReasoningContent)
+				pendingReasoningContent = ""
 
 			case "function_call_output":
-				// Handle function call output conversion to tool message
-				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-
-				if callId := item.Get("call_id"); callId.Exists() {
-					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callId.String())
-				}
-
-				if output := item.Get("output"); output.Exists() {
-					toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
-				}
-
-				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
+				// Drop orphaned tool outputs here because Chat Completions requires every
+				// tool message to immediately follow an assistant tool_calls message.
 			}
-
-			return true
-		})
+		}
 	} else if input.Type == gjson.String {
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")

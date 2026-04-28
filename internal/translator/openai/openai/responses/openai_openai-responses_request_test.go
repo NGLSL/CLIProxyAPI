@@ -148,3 +148,44 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsReplaysReasoningFor
 		t.Fatalf("messages.1.content = %q, want %q", got, "file contents")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsDropsUnansweredToolCalls(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{"type":"message","role":"user","content":"next"},
+			{"type":"reasoning","content":[{"type":"reasoning_text","text":"准备调用工具"}],"summary":[]},
+			{"type":"function_call","call_id":"call_done","name":"Read","arguments":"{\"file_path\":\"done.txt\"}"},
+			{"type":"function_call","call_id":"call_orphan","name":"Read","arguments":"{\"file_path\":\"orphan.txt\"}"},
+			{"type":"function_call_output","call_id":"call_done","output":"done contents"},
+			{"type":"message","role":"user","content":"continue"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-pro", raw, false)
+
+	assistantMessage := gjson.GetBytes(out, "messages.1")
+	if got := assistantMessage.Get("role").String(); got != "assistant" {
+		t.Fatalf("messages.1.role = %q, want %q", got, "assistant")
+	}
+	if got := assistantMessage.Get("reasoning_content").String(); got != "准备调用工具" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", got, "准备调用工具")
+	}
+	if got := assistantMessage.Get("tool_calls.#").Int(); got != 1 {
+		t.Fatalf("messages.1.tool_calls length = %d, want %d; out = %s", got, 1, string(out))
+	}
+	if got := assistantMessage.Get("tool_calls.0.id").String(); got != "call_done" {
+		t.Fatalf("messages.1.tool_calls.0.id = %q, want %q", got, "call_done")
+	}
+	if assistantMessage.Get("tool_calls.1.id").Exists() {
+		t.Fatalf("unexpected orphan tool call kept: %s", assistantMessage.Raw)
+	}
+	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "tool" {
+		t.Fatalf("messages.2.role = %q, want %q", got, "tool")
+	}
+	if got := gjson.GetBytes(out, "messages.2.tool_call_id").String(); got != "call_done" {
+		t.Fatalf("messages.2.tool_call_id = %q, want %q", got, "call_done")
+	}
+	if got := gjson.GetBytes(out, "messages.3.content").String(); got != "continue" {
+		t.Fatalf("messages.3.content = %q, want %q", got, "continue")
+	}
+}
