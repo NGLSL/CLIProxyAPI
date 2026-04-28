@@ -1553,7 +1553,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 						}
 						thinking := m.Thinking
 						if thinking == nil {
-							thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+							thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}}
 						}
 						ms = append(ms, &ModelInfo{
 							ID:          modelID,
