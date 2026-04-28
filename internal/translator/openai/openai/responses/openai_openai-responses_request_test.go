@@ -189,3 +189,200 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsDropsUnansweredTool
 		t.Fatalf("messages.3.content = %q, want %q", got, "continue")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsMergesAssistantMessageWithToolCalls(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{
+				"type":"reasoning",
+				"content":[{"type":"reasoning_text","text":"需要先读取核心文件"}],
+				"summary":[]
+			},
+			{
+				"type":"message",
+				"role":"assistant",
+				"content":[{"type":"output_text","text":"接着读取核心架构文件。"}]
+			},
+			{
+				"type":"function_call",
+				"call_id":"call_1",
+				"name":"Read",
+				"arguments":"{\"file_path\":\"cli.tsx\"}"
+			},
+			{
+				"type":"function_call",
+				"call_id":"call_2",
+				"name":"Read",
+				"arguments":"{\"file_path\":\"main.tsx\"}"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_1",
+				"output":"cli contents"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_2",
+				"output":"main contents"
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-pro", raw, false)
+
+	assistantMessage := gjson.GetBytes(out, "messages.0")
+	if got := assistantMessage.Get("role").String(); got != "assistant" {
+		t.Fatalf("messages.0.role = %q, want %q", got, "assistant")
+	}
+	if got := assistantMessage.Get("reasoning_content").String(); got != "需要先读取核心文件" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "需要先读取核心文件")
+	}
+	if got := assistantMessage.Get("content.0.text").String(); got != "接着读取核心架构文件。" {
+		t.Fatalf("messages.0.content.0.text = %q, want %q", got, "接着读取核心架构文件。")
+	}
+	if got := assistantMessage.Get("tool_calls.#").Int(); got != 2 {
+		t.Fatalf("messages.0.tool_calls length = %d, want %d; out = %s", got, 2, string(out))
+	}
+	if got := assistantMessage.Get("tool_calls.1.id").String(); got != "call_2" {
+		t.Fatalf("messages.0.tool_calls.1.id = %q, want %q", got, "call_2")
+	}
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "tool" {
+		t.Fatalf("messages.1.role = %q, want %q", got, "tool")
+	}
+	if got := gjson.GetBytes(out, "messages.2.tool_call_id").String(); got != "call_2" {
+		t.Fatalf("messages.2.tool_call_id = %q, want %q", got, "call_2")
+	}
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages length = %d, want %d; out = %s", got, 3, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsReplaysReasoningForAssistantMessage(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{
+				"type":"reasoning",
+				"content":[{"type":"reasoning_text","text":"先总结上一轮结果"}],
+				"summary":[]
+			},
+			{
+				"type":"message",
+				"role":"assistant",
+				"content":[{"type":"output_text","text":"这是整理后的说明。"}]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-pro", raw, false)
+
+	assistantMessage := gjson.GetBytes(out, "messages.0")
+	if got := assistantMessage.Get("role").String(); got != "assistant" {
+		t.Fatalf("messages.0.role = %q, want %q", got, "assistant")
+	}
+	if got := assistantMessage.Get("reasoning_content").String(); got != "先总结上一轮结果" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "先总结上一轮结果")
+	}
+	if got := assistantMessage.Get("content.0.text").String(); got != "这是整理后的说明。" {
+		t.Fatalf("messages.0.content.0.text = %q, want %q", got, "这是整理后的说明。")
+	}
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 1 {
+		t.Fatalf("messages length = %d, want %d; out = %s", got, 1, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsSkipsInterleavedAssistantMessagesBeforeToolOutputs(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{
+				"type":"reasoning",
+				"summary":[{"type":"summary_text","text":"Let me now read the key source files to understand the architecture better."}]
+			},
+			{
+				"role":"assistant",
+				"content":"接着读取核心架构文件。"
+			},
+			{
+				"type":"function_call",
+				"call_id":"call_00_gXdjsKEi0Ma9lEf1l4mStqmA",
+				"name":"Read",
+				"arguments":"{\"file_path\":\"D:\\\\Project\\\\my-claude-code\\\\my-claude\\\\src\\\\entrypoints\\\\cli.tsx\"}"
+			},
+			{
+				"type":"function_call",
+				"call_id":"call_01_f4SGPENHZwP2ziukEhTuXP7p",
+				"name":"Read",
+				"arguments":"{\"file_path\":\"D:\\\\Project\\\\my-claude-code\\\\my-claude\\\\src\\\\main.tsx\"}"
+			},
+			{
+				"type":"function_call",
+				"call_id":"call_02_841H80XW9YqdrUuamo2jEHiX",
+				"name":"Read",
+				"arguments":"{\"file_path\":\"D:\\\\Project\\\\my-claude-code\\\\my-claude\\\\src\\\\commands.ts\"}"
+			},
+			{
+				"role":"assistant",
+				"content":"{\"title\":\"Read project files\"}"
+			},
+			{
+				"role":"assistant",
+				"content":"{\"title\":\"我现在还不能直接读取当前工作区内容，请先发我项目目录树或关键文件\"}"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_00_gXdjsKEi0Ma9lEf1l4mStqmA",
+				"output":"cli.tsx contents"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_01_f4SGPENHZwP2ziukEhTuXP7p",
+				"output":"main.tsx contents"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_02_841H80XW9YqdrUuamo2jEHiX",
+				"output":"commands.ts contents"
+			},
+			{
+				"role":"user",
+				"content":"continue"
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-pro", raw, false)
+
+	assistantMessage := gjson.GetBytes(out, "messages.0")
+	if got := assistantMessage.Get("role").String(); got != "assistant" {
+		t.Fatalf("messages.0.role = %q, want %q", got, "assistant")
+	}
+	if got := assistantMessage.Get("reasoning_content").String(); got != "Let me now read the key source files to understand the architecture better." {
+		t.Fatalf("messages.0.reasoning_content = %q, want reasoning summary", got)
+	}
+	if got := assistantMessage.Get("content").String(); got != "接着读取核心架构文件。" {
+		t.Fatalf("messages.0.content = %q, want %q", got, "接着读取核心架构文件。")
+	}
+	if got := assistantMessage.Get("tool_calls.#").Int(); got != 3 {
+		t.Fatalf("messages.0.tool_calls length = %d, want %d; out = %s", got, 3, string(out))
+	}
+	if got := assistantMessage.Get("tool_calls.2.id").String(); got != "call_02_841H80XW9YqdrUuamo2jEHiX" {
+		t.Fatalf("messages.0.tool_calls.2.id = %q, want %q", got, "call_02_841H80XW9YqdrUuamo2jEHiX")
+	}
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "tool" {
+		t.Fatalf("messages.1.role = %q, want %q", got, "tool")
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != "call_00_gXdjsKEi0Ma9lEf1l4mStqmA" {
+		t.Fatalf("messages.1.tool_call_id = %q, want %q", got, "call_00_gXdjsKEi0Ma9lEf1l4mStqmA")
+	}
+	if got := gjson.GetBytes(out, "messages.3.tool_call_id").String(); got != "call_02_841H80XW9YqdrUuamo2jEHiX" {
+		t.Fatalf("messages.3.tool_call_id = %q, want %q", got, "call_02_841H80XW9YqdrUuamo2jEHiX")
+	}
+	if got := gjson.GetBytes(out, "messages.4.role").String(); got != "user" {
+		t.Fatalf("messages.4.role = %q, want %q", got, "user")
+	}
+	if got := gjson.GetBytes(out, "messages.4.content").String(); got != "continue" {
+		t.Fatalf("messages.4.content = %q, want %q", got, "continue")
+	}
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 5 {
+		t.Fatalf("messages length = %d, want %d; out = %s", got, 5, string(out))
+	}
+}

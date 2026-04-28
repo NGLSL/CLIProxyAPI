@@ -84,7 +84,116 @@ func buildResponsesToolMessage(item gjson.Result) []byte {
 	return toolMessage
 }
 
-func appendResponsesToolCallGroup(out []byte, calls, outputs []gjson.Result, reasoningContent string) []byte {
+func isResponsesAssistantMessage(item gjson.Result) bool {
+	return responsesInputItemType(item) == "message" && item.Get("role").String() == "assistant"
+}
+
+func collectResponsesToolOutputs(items []gjson.Result, start int) ([]gjson.Result, int) {
+	var outputs []gjson.Result
+	i := start
+	for i < len(items) {
+		item := items[i]
+		itemType := responsesInputItemType(item)
+		switch itemType {
+		case "function_call_output":
+			outputs = append(outputs, item)
+			i++
+		case "message":
+			if isResponsesAssistantMessage(item) && len(outputs) == 0 {
+				// My Claude 的 /responses 历史里，工具调用后可能先写入一两条
+				// assistant commentary / title / 兜底文本，再补 function_call_output。
+				// Chat Completions 不允许 tool_calls 与 tool message 之间夹普通
+				// assistant message，所以只有后面确实找到 tool output 时，才会
+				// 吞掉这些中间态消息并把 call/output 合并成一组合法历史。
+				i++
+				continue
+			}
+			if len(outputs) == 0 {
+				return outputs, start
+			}
+			return outputs, i
+		default:
+			if len(outputs) == 0 {
+				return outputs, start
+			}
+			return outputs, i
+		}
+	}
+	if len(outputs) == 0 {
+		return outputs, start
+	}
+	return outputs, i
+}
+
+func setResponsesReasoningContent(message []byte, reasoningContent string) []byte {
+	if reasoningContent == "" {
+		return message
+	}
+	updated, err := sjson.SetBytes(message, "reasoning_content", reasoningContent)
+	if err != nil {
+		return message
+	}
+	return updated
+}
+
+func appendResponsesAssistantMessage(out []byte, message []byte, reasoningContent string) []byte {
+	if len(message) == 0 {
+		return out
+	}
+	message = setResponsesReasoningContent(message, reasoningContent)
+	out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+	return out
+}
+
+func flushPendingResponsesAssistantMessage(out []byte, pendingAssistantMessage *[]byte, pendingReasoningContent *string) []byte {
+	if len(*pendingAssistantMessage) == 0 {
+		*pendingReasoningContent = ""
+		return out
+	}
+	out = appendResponsesAssistantMessage(out, *pendingAssistantMessage, *pendingReasoningContent)
+	*pendingAssistantMessage = nil
+	*pendingReasoningContent = ""
+	return out
+}
+
+func buildResponsesChatMessage(item gjson.Result) []byte {
+	role := item.Get("role").String()
+	if role == "developer" {
+		role = "user"
+	}
+
+	message := []byte(`{"role":"","content":[]}`)
+	message, _ = sjson.SetBytes(message, "role", role)
+
+	if content := item.Get("content"); content.Exists() && content.IsArray() {
+		content.ForEach(func(_, contentItem gjson.Result) bool {
+			contentType := contentItem.Get("type").String()
+			if contentType == "" {
+				contentType = "input_text"
+			}
+
+			switch contentType {
+			case "input_text", "output_text":
+				text := contentItem.Get("text").String()
+				contentPart := []byte(`{"type":"text","text":""}`)
+				contentPart, _ = sjson.SetBytes(contentPart, "text", text)
+				message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
+			case "input_image":
+				imageURL := contentItem.Get("image_url").String()
+				contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+				contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
+				message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
+			}
+			return true
+		})
+	} else if content.Type == gjson.String {
+		message, _ = sjson.SetBytes(message, "content", content.String())
+	}
+
+	return message
+}
+
+func appendResponsesToolCallGroup(out []byte, assistantMessage []byte, calls, outputs []gjson.Result, reasoningContent string) ([]byte, bool) {
 	outputCallIDs := make(map[string]struct{}, len(outputs))
 	for _, output := range outputs {
 		if callID := responsesCallID(output); callID != "" {
@@ -92,7 +201,9 @@ func appendResponsesToolCallGroup(out []byte, calls, outputs []gjson.Result, rea
 		}
 	}
 
-	assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+	if len(assistantMessage) == 0 {
+		assistantMessage = []byte(`{"role":"assistant","tool_calls":[]}`)
+	}
 	pairedCallIDs := make(map[string]struct{}, len(calls))
 	for _, call := range calls {
 		callID := responsesCallID(call)
@@ -106,12 +217,9 @@ func appendResponsesToolCallGroup(out []byte, calls, outputs []gjson.Result, rea
 		pairedCallIDs[callID] = struct{}{}
 	}
 	if len(pairedCallIDs) == 0 {
-		return out
+		return out, false
 	}
-	if reasoningContent != "" {
-		assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
-	}
-	out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
+	out = appendResponsesAssistantMessage(out, assistantMessage, reasoningContent)
 
 	for _, output := range outputs {
 		callID := responsesCallID(output)
@@ -120,7 +228,7 @@ func appendResponsesToolCallGroup(out []byte, calls, outputs []gjson.Result, rea
 		}
 		out, _ = sjson.SetRawBytes(out, "messages.-1", buildResponsesToolMessage(output))
 	}
-	return out
+	return out, true
 }
 
 // ConvertOpenAIResponsesRequestToOpenAIChatCompletions converts OpenAI responses format to OpenAI chat completions format.
@@ -190,6 +298,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		pendingReasoningContent := ""
+		var pendingAssistantMessage []byte
 		items := input.Array()
 		for i := 0; i < len(items); i++ {
 			item := items[i]
@@ -197,53 +306,24 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 			switch itemType {
 			case "reasoning":
+				// Responses 会把同一个 assistant turn 拆成 reasoning / message / function_call 多个 item。
+				// 如果前一个 assistant message 还没落盘，先冲刷掉，避免这段 reasoning 串到后面的 turn。
+				out = flushPendingResponsesAssistantMessage(out, &pendingAssistantMessage, &pendingReasoningContent)
 				pendingReasoningContent = extractResponsesReasoningText(item)
 
 			case "message", "":
-				// Handle regular message conversion
-				role := item.Get("role").String()
-				if role == "developer" {
-					role = "user"
-				}
-				message := []byte(`{"role":"","content":[]}`)
-				message, _ = sjson.SetBytes(message, "role", role)
-
-				if content := item.Get("content"); content.Exists() && content.IsArray() {
-					var messageContent string
-					var toolCalls []interface{}
-
-					content.ForEach(func(_, contentItem gjson.Result) bool {
-						contentType := contentItem.Get("type").String()
-						if contentType == "" {
-							contentType = "input_text"
-						}
-
-						switch contentType {
-						case "input_text", "output_text":
-							text := contentItem.Get("text").String()
-							contentPart := []byte(`{"type":"text","text":""}`)
-							contentPart, _ = sjson.SetBytes(contentPart, "text", text)
-							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
-						case "input_image":
-							imageURL := contentItem.Get("image_url").String()
-							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
-							contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
-							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
-						}
-						return true
-					})
-
-					if messageContent != "" {
-						message, _ = sjson.SetBytes(message, "content", messageContent)
+				message := buildResponsesChatMessage(item)
+				if item.Get("role").String() == "assistant" {
+					// assistant text 先暂存；如果后面紧跟 function_call，说明这是同一个 turn，
+					// 需要把 content / reasoning_content / tool_calls 合并回一条 assistant message。
+					if len(pendingAssistantMessage) > 0 {
+						out = flushPendingResponsesAssistantMessage(out, &pendingAssistantMessage, &pendingReasoningContent)
 					}
-
-					if len(toolCalls) > 0 {
-						message, _ = sjson.SetBytes(message, "tool_calls", toolCalls)
-					}
-				} else if content.Type == gjson.String {
-					message, _ = sjson.SetBytes(message, "content", content.String())
+					pendingAssistantMessage = message
+					continue
 				}
 
+				out = flushPendingResponsesAssistantMessage(out, &pendingAssistantMessage, &pendingReasoningContent)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
 
 			case "function_call":
@@ -253,21 +333,29 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					i++
 				}
 
-				var outputs []gjson.Result
-				for i < len(items) && responsesInputItemType(items[i]) == "function_call_output" {
-					outputs = append(outputs, items[i])
-					i++
-				}
-				i--
+				// Responses 历史里，tool outputs 不一定紧跟在 function_call 后面；
+				// 某些客户端会先插入 assistant commentary/status message。
+				// 这里要继续向后找真正的 function_call_output，避免把同一轮工具调用
+				// 错拆成“孤立 tool_calls + 孤立 tool outputs”。
+				outputs, nextIndex := collectResponsesToolOutputs(items, i)
+				i = nextIndex - 1
 
-				out = appendResponsesToolCallGroup(out, calls, outputs, pendingReasoningContent)
-				pendingReasoningContent = ""
+				var appended bool
+				out, appended = appendResponsesToolCallGroup(out, pendingAssistantMessage, calls, outputs, pendingReasoningContent)
+				if appended {
+					pendingAssistantMessage = nil
+					pendingReasoningContent = ""
+					continue
+				}
+
+				out = flushPendingResponsesAssistantMessage(out, &pendingAssistantMessage, &pendingReasoningContent)
 
 			case "function_call_output":
 				// Drop orphaned tool outputs here because Chat Completions requires every
 				// tool message to immediately follow an assistant tool_calls message.
 			}
 		}
+		out = flushPendingResponsesAssistantMessage(out, &pendingAssistantMessage, &pendingReasoningContent)
 	} else if input.Type == gjson.String {
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")
