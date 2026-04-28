@@ -259,6 +259,18 @@ func (s *Service) restoreUsageSnapshot() {
 		return
 	}
 
+	if usageSnapshotHasHigherAggregate(snapshot, current) {
+		merged := mergeUsageSnapshots(snapshot, current)
+		result := stats.RestoreSnapshot(merged)
+		log.Infof(
+			"restored larger usage snapshot from %s before merging current usage (requests=%d details=%d)",
+			path,
+			result.Requests,
+			result.Details,
+		)
+		return
+	}
+
 	result := stats.MergeSnapshot(snapshot)
 	if result.Added > 0 || result.Skipped > 0 {
 		log.Infof("merged usage snapshot from %s (added=%d skipped=%d)", path, result.Added, result.Skipped)
@@ -275,10 +287,229 @@ func (s *Service) persistUsageSnapshot() error {
 		return nil
 	}
 
-	if err := internalusage.SaveRequestStatisticsToFile(path, internalusage.GetRequestStatistics()); err != nil {
+	stats := internalusage.GetRequestStatistics()
+	snapshot := stats.Snapshot()
+	protectedSnapshot, err := s.protectUsageSnapshotBeforePersist(path, stats, snapshot)
+	if err != nil {
+		return fmt.Errorf("protect usage snapshot before persist to %s: %w", path, err)
+	}
+
+	if err := internalusage.SaveSnapshotToFile(path, protectedSnapshot); err != nil {
 		return fmt.Errorf("persist usage snapshot to %s: %w", path, err)
 	}
 	return nil
+}
+
+func (s *Service) protectUsageSnapshotBeforePersist(path string, stats *internalusage.RequestStatistics, current internalusage.StatisticsSnapshot) (internalusage.StatisticsSnapshot, error) {
+	existing, err := internalusage.LoadSnapshotFromFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return current, nil
+		}
+		return current, err
+	}
+
+	if !usageSnapshotHasHigherAggregate(existing, current) {
+		return current, nil
+	}
+
+	merged := mergeUsageSnapshots(existing, current)
+	if stats != nil {
+		result := stats.RestoreSnapshot(merged)
+		log.Warnf(
+			"preserved larger usage snapshot from %s before persist (requests=%d details=%d)",
+			path,
+			result.Requests,
+			result.Details,
+		)
+		return stats.Snapshot(), nil
+	}
+
+	return merged, nil
+}
+
+func usageSnapshotHasHigherAggregate(candidate, current internalusage.StatisticsSnapshot) bool {
+	candidateRequests, candidateTokens := usageSnapshotAggregate(candidate)
+	currentRequests, currentTokens := usageSnapshotAggregate(current)
+	return candidateRequests > currentRequests || candidateTokens > currentTokens
+}
+
+func usageSnapshotAggregate(snapshot internalusage.StatisticsSnapshot) (int64, int64) {
+	requests := nonNegativeUsageValue(snapshot.TotalRequests)
+	tokens := nonNegativeUsageValue(snapshot.TotalTokens)
+
+	var apiRequests int64
+	var apiTokens int64
+	for _, apiSnapshot := range snapshot.APIs {
+		modelRequests, modelTokens := usageModelAggregate(apiSnapshot.Models)
+		apiRequests += maxUsageValue(apiSnapshot.TotalRequests, modelRequests)
+		apiTokens += maxUsageValue(apiSnapshot.TotalTokens, modelTokens)
+	}
+	if apiRequests > requests {
+		requests = apiRequests
+	}
+	if apiTokens > tokens {
+		tokens = apiTokens
+	}
+
+	return requests, tokens
+}
+
+func usageModelAggregate(models map[string]internalusage.ModelSnapshot) (int64, int64) {
+	var requests int64
+	var tokens int64
+	for _, modelSnapshot := range models {
+		requests += nonNegativeUsageValue(modelSnapshot.TotalRequests)
+		tokens += nonNegativeUsageValue(modelSnapshot.TotalTokens)
+	}
+	return requests, tokens
+}
+
+func mergeUsageSnapshots(base, delta internalusage.StatisticsSnapshot) internalusage.StatisticsSnapshot {
+	base = normaliseUsageSnapshot(base)
+	delta = normaliseUsageSnapshot(delta)
+
+	merged := internalusage.StatisticsSnapshot{
+		TotalRequests:  base.TotalRequests + delta.TotalRequests,
+		SuccessCount:   base.SuccessCount + delta.SuccessCount,
+		FailureCount:   base.FailureCount + delta.FailureCount,
+		TotalTokens:    base.TotalTokens + delta.TotalTokens,
+		APIs:           make(map[string]internalusage.APISnapshot, len(base.APIs)+len(delta.APIs)),
+		RequestsByDay:  addUsageMaps(base.RequestsByDay, delta.RequestsByDay),
+		RequestsByHour: addUsageMaps(base.RequestsByHour, delta.RequestsByHour),
+		TokensByDay:    addUsageMaps(base.TokensByDay, delta.TokensByDay),
+		TokensByHour:   addUsageMaps(base.TokensByHour, delta.TokensByHour),
+	}
+
+	for apiName, apiSnapshot := range base.APIs {
+		merged.APIs[apiName] = cloneUsageAPISnapshot(apiSnapshot)
+	}
+	for apiName, apiSnapshot := range delta.APIs {
+		merged.APIs[apiName] = mergeUsageAPISnapshots(merged.APIs[apiName], apiSnapshot)
+	}
+
+	return normaliseUsageSnapshot(merged)
+}
+
+func normaliseUsageSnapshot(snapshot internalusage.StatisticsSnapshot) internalusage.StatisticsSnapshot {
+	stats := internalusage.NewRequestStatistics()
+	stats.RestoreSnapshot(snapshot)
+	return stats.Snapshot()
+}
+
+func cloneUsageAPISnapshot(snapshot internalusage.APISnapshot) internalusage.APISnapshot {
+	cloned := internalusage.APISnapshot{
+		TotalRequests: snapshot.TotalRequests,
+		TotalTokens:   snapshot.TotalTokens,
+		Models:        make(map[string]internalusage.ModelSnapshot, len(snapshot.Models)),
+	}
+	for modelName, modelSnapshot := range snapshot.Models {
+		cloned.Models[modelName] = cloneUsageModelSnapshot(modelSnapshot)
+	}
+	return cloned
+}
+
+func mergeUsageAPISnapshots(base, delta internalusage.APISnapshot) internalusage.APISnapshot {
+	merged := cloneUsageAPISnapshot(base)
+	merged.TotalRequests += delta.TotalRequests
+	merged.TotalTokens += delta.TotalTokens
+	if merged.Models == nil {
+		merged.Models = make(map[string]internalusage.ModelSnapshot, len(delta.Models))
+	}
+	for modelName, modelSnapshot := range delta.Models {
+		merged.Models[modelName] = mergeUsageModelSnapshots(merged.Models[modelName], modelSnapshot)
+	}
+	return merged
+}
+
+func cloneUsageModelSnapshot(snapshot internalusage.ModelSnapshot) internalusage.ModelSnapshot {
+	return internalusage.ModelSnapshot{
+		TotalRequests: snapshot.TotalRequests,
+		TotalTokens:   snapshot.TotalTokens,
+		Details:       copyUsageDetails(snapshot.Details),
+	}
+}
+
+func mergeUsageModelSnapshots(base, delta internalusage.ModelSnapshot) internalusage.ModelSnapshot {
+	return internalusage.ModelSnapshot{
+		TotalRequests: base.TotalRequests + delta.TotalRequests,
+		TotalTokens:   base.TotalTokens + delta.TotalTokens,
+		Details:       mergeUsageDetails(base.Details, delta.Details),
+	}
+}
+
+func mergeUsageDetails(base, delta []internalusage.RequestDetail) []internalusage.RequestDetail {
+	if len(base) == 0 {
+		return copyUsageDetails(delta)
+	}
+	if len(delta) == 0 {
+		return copyUsageDetails(base)
+	}
+
+	seen := make(map[string]struct{}, len(base)+len(delta))
+	merged := make([]internalusage.RequestDetail, 0, len(base)+len(delta))
+	for _, details := range [][]internalusage.RequestDetail{base, delta} {
+		for _, detail := range details {
+			key := usageDetailKey(detail)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, detail)
+		}
+	}
+	return merged
+}
+
+func usageDetailKey(detail internalusage.RequestDetail) string {
+	return fmt.Sprintf(
+		"%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		detail.Timestamp.UTC().Format(time.RFC3339Nano),
+		detail.Source,
+		detail.AuthIndex,
+		detail.Failed,
+		detail.Tokens.InputTokens,
+		detail.Tokens.OutputTokens,
+		detail.Tokens.ReasoningTokens,
+		detail.Tokens.CachedTokens,
+		detail.Tokens.TotalTokens,
+	)
+}
+
+func copyUsageDetails(source []internalusage.RequestDetail) []internalusage.RequestDetail {
+	if len(source) == 0 {
+		return nil
+	}
+	copied := make([]internalusage.RequestDetail, len(source))
+	copy(copied, source)
+	return copied
+}
+
+func addUsageMaps(base, delta map[string]int64) map[string]int64 {
+	merged := make(map[string]int64, len(base)+len(delta))
+	for key, value := range base {
+		merged[key] = nonNegativeUsageValue(value)
+	}
+	for key, value := range delta {
+		merged[key] += nonNegativeUsageValue(value)
+	}
+	return merged
+}
+
+func maxUsageValue(value, minimum int64) int64 {
+	value = nonNegativeUsageValue(value)
+	minimum = nonNegativeUsageValue(minimum)
+	if value < minimum {
+		return minimum
+	}
+	return value
+}
+
+func nonNegativeUsageValue(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func (s *Service) setAuthRuntimeSnapshot(snapshot coreauth.RuntimeSnapshot) {
@@ -1356,6 +1587,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 	}
 	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
+	models = applyAllowedModelsForAuth(a, provider, models)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {
@@ -1551,6 +1783,92 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 		return nil
 	}
 	return cfg.OAuthExcludedModels[providerKey]
+}
+
+func allowedModelsFromAuth(a *coreauth.Auth) []string {
+	if a == nil || a.Attributes == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(a.Attributes["models"])
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		modelID := strings.TrimSpace(part)
+		if modelID == "" {
+			continue
+		}
+		key := strings.ToLower(modelID)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, modelID)
+	}
+	return out
+}
+
+func applyAllowedModelsForAuth(a *coreauth.Auth, provider string, models []*ModelInfo) []*ModelInfo {
+	allowed := allowedModelsFromAuth(a)
+	if len(allowed) == 0 {
+		return models
+	}
+
+	byID := make(map[string]*ModelInfo, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		byID[strings.ToLower(modelID)] = model
+	}
+
+	now := time.Now().Unix()
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	out := make([]*ModelInfo, 0, len(allowed))
+	seen := make(map[string]struct{}, len(allowed))
+	for _, modelID := range allowed {
+		key := strings.ToLower(strings.TrimSpace(modelID))
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		if existing := byID[key]; existing != nil {
+			out = append(out, existing)
+			continue
+		}
+		info := &ModelInfo{
+			ID:          modelID,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     providerKey,
+			Type:        providerKey,
+			DisplayName: modelID,
+			UserDefined: true,
+		}
+		if upstream := registry.LookupStaticModelInfo(modelID); upstream != nil {
+			if strings.TrimSpace(upstream.OwnedBy) != "" {
+				info.OwnedBy = upstream.OwnedBy
+			}
+			if strings.TrimSpace(upstream.Type) != "" {
+				info.Type = upstream.Type
+			}
+			if upstream.Thinking != nil {
+				info.Thinking = upstream.Thinking
+			}
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {

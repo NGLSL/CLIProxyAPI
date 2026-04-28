@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	internalconfig "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -104,6 +105,64 @@ func TestManager_RefreshSchedulerEntry_RebuildsSupportedModelSetAfterModelRegist
 	}
 }
 
+func TestManager_PickNextLegacy_FileFirstFallsBackToAPILayerForUnsupportedModel(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{SourcePreference: "file-first"}})
+
+	registerSchedulerModels(t, "gemini", "file-only-model", "file-auth")
+	registerSchedulerModels(t, "gemini", "api-only-model", "api-a", "api-b")
+
+	auths := []*Auth{
+		{ID: "file-auth", Provider: "gemini", Attributes: map[string]string{"source_type": "file"}},
+		{ID: "api-b", Provider: "gemini", Attributes: map[string]string{"source_type": "api"}},
+		{ID: "api-a", Provider: "gemini", Attributes: map[string]string{"source_type": "api"}},
+	}
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+			t.Fatalf("register %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	want := []string{"api-a", "api-b", "api-a"}
+	for index, wantID := range want {
+		got, _, errPick := manager.pickNextLegacy(ctx, "gemini", "api-only-model", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickNextLegacy() #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != wantID {
+			t.Fatalf("pickNextLegacy() #%d auth = %v, want %s", index, got, wantID)
+		}
+	}
+}
+
+func TestManager_PickNextLegacy_FileFirstPrefersFileLayerWhenSupported(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{SourcePreference: "file-first"}})
+
+	registerSchedulerModels(t, "gemini", "shared-model", "file-auth", "api-auth")
+
+	auths := []*Auth{
+		{ID: "api-auth", Provider: "gemini", Attributes: map[string]string{"source_type": "api"}},
+		{ID: "file-auth", Provider: "gemini", Attributes: map[string]string{"source_type": "file"}},
+	}
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+			t.Fatalf("register %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	got, _, errPick := manager.pickNextLegacy(ctx, "gemini", "shared-model", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextLegacy() error = %v", errPick)
+	}
+	if got == nil || got.ID != "file-auth" {
+		t.Fatalf("pickNextLegacy() auth = %v, want file-auth", got)
+	}
+}
 func TestManager_PickNext_RebuildsSchedulerAfterModelCooldownError(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)

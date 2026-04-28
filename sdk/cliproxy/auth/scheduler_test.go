@@ -676,6 +676,32 @@ func TestSchedulerPick_FileFirstKeepsSelectionInsideFileLayer(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_FileFirstFallsBackToAPILayerForUnsupportedModel(t *testing.T) {
+	t.Parallel()
+
+	model := "api-only-model"
+	registerSchedulerModels(t, "gemini", "file-only-model", "file-auth")
+	registerSchedulerModels(t, "gemini", model, "api-a", "api-b")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "file-auth", Provider: "gemini", Attributes: map[string]string{"source_type": "file"}},
+		&Auth{ID: "api-b", Provider: "gemini", Attributes: map[string]string{"source_type": "api"}},
+		&Auth{ID: "api-a", Provider: "gemini", Attributes: map[string]string{"source_type": "api"}},
+	)
+	scheduler.sourcePreference = routingSourcePreferenceFileFirst
+
+	want := []string{"api-a", "api-b", "api-a"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth = %v, want %s", index, got, wantID)
+		}
+	}
+}
+
 func TestSchedulerPick_StickyRoundRobinRebindsWhenPreferredLayerReturns(t *testing.T) {
 	t.Parallel()
 

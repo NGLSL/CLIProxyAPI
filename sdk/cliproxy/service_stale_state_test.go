@@ -358,6 +358,176 @@ func TestServiceShutdownFlushUsageAndPersistSavesDrainedRecords(t *testing.T) {
 	}
 }
 
+func TestServicePersistUsageSnapshotPreservesLargerStoredAggregate(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	prevEnabled := internalusage.StatisticsEnabled()
+	internalusage.SetStatisticsEnabled(true)
+	internalusage.ResetDefaultRequestStatistics()
+	t.Cleanup(func() {
+		internalusage.ResetDefaultRequestStatistics()
+		internalusage.SetStatisticsEnabled(prevEnabled)
+	})
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	snapshotPath := internalusage.DefaultSnapshotPath(configPath)
+	storedTime := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	if err := internalusage.SaveSnapshotToFile(snapshotPath, internalusage.StatisticsSnapshot{
+		TotalRequests: 100,
+		SuccessCount:  95,
+		FailureCount:  5,
+		TotalTokens:   1000,
+		APIs: map[string]internalusage.APISnapshot{
+			"stored-key": {
+				TotalRequests: 100,
+				TotalTokens:   1000,
+				Models: map[string]internalusage.ModelSnapshot{
+					"gpt-5.4": {
+						TotalRequests: 100,
+						TotalTokens:   1000,
+						Details: []internalusage.RequestDetail{{
+							Timestamp: storedTime,
+							Source:    "stored-source",
+							Tokens: internalusage.TokenStats{
+								InputTokens:  400,
+								OutputTokens: 600,
+								TotalTokens:  1000,
+							},
+						}},
+					},
+				},
+			},
+		},
+		RequestsByDay:  map[string]int64{"2026-04-17": 100},
+		RequestsByHour: map[string]int64{"10": 100},
+		TokensByDay:    map[string]int64{"2026-04-17": 1000},
+		TokensByHour:   map[string]int64{"10": 1000},
+	}); err != nil {
+		t.Fatalf("SaveSnapshotToFile() error = %v", err)
+	}
+
+	stats := internalusage.GetRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "live-key",
+		Model:       "gpt-5.4",
+		RequestedAt: storedTime.Add(time.Hour),
+		Detail: coreusage.Detail{
+			InputTokens:  5,
+			OutputTokens: 7,
+			TotalTokens:  12,
+		},
+	})
+
+	service := &Service{configPath: configPath}
+	if err := service.persistUsageSnapshot(); err != nil {
+		t.Fatalf("persistUsageSnapshot() error = %v", err)
+	}
+
+	loaded, err := internalusage.LoadSnapshotFromFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("LoadSnapshotFromFile() error = %v", err)
+	}
+	if loaded.TotalRequests != 101 {
+		t.Fatalf("total requests = %d, want 101", loaded.TotalRequests)
+	}
+	if loaded.SuccessCount != 96 {
+		t.Fatalf("success count = %d, want 96", loaded.SuccessCount)
+	}
+	if loaded.FailureCount != 5 {
+		t.Fatalf("failure count = %d, want 5", loaded.FailureCount)
+	}
+	if loaded.TotalTokens != 1012 {
+		t.Fatalf("total tokens = %d, want 1012", loaded.TotalTokens)
+	}
+	if loaded.APIs["stored-key"].TotalTokens != 1000 {
+		t.Fatalf("stored api tokens = %d, want 1000", loaded.APIs["stored-key"].TotalTokens)
+	}
+	if loaded.APIs["live-key"].TotalTokens != 12 {
+		t.Fatalf("live api tokens = %d, want 12", loaded.APIs["live-key"].TotalTokens)
+	}
+}
+
+func TestServicePersistUsageSnapshotPreservesTrimmedLiveAggregate(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	prevEnabled := internalusage.StatisticsEnabled()
+	internalusage.SetStatisticsEnabled(true)
+	internalusage.ResetDefaultRequestStatistics()
+	t.Cleanup(func() {
+		internalusage.ResetDefaultRequestStatistics()
+		internalusage.SetStatisticsEnabled(prevEnabled)
+	})
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	snapshotPath := internalusage.DefaultSnapshotPath(configPath)
+	storedTime := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	if err := internalusage.SaveSnapshotToFile(snapshotPath, internalusage.StatisticsSnapshot{
+		TotalRequests: 1000,
+		SuccessCount:  1000,
+		TotalTokens:   1000,
+		APIs: map[string]internalusage.APISnapshot{
+			"stored-key": {
+				TotalRequests: 1000,
+				TotalTokens:   1000,
+				Models: map[string]internalusage.ModelSnapshot{
+					"gpt-5.4": {
+						TotalRequests: 1000,
+						TotalTokens:   1000,
+						Details: []internalusage.RequestDetail{{
+							Timestamp: storedTime,
+							Source:    "stored-source",
+							Tokens:    internalusage.TokenStats{InputTokens: 1, TotalTokens: 1},
+						}},
+					},
+				},
+			},
+		},
+		RequestsByDay:  map[string]int64{"2026-04-17": 1000},
+		RequestsByHour: map[string]int64{"10": 1000},
+		TokensByDay:    map[string]int64{"2026-04-17": 1000},
+		TokensByHour:   map[string]int64{"10": 1000},
+	}); err != nil {
+		t.Fatalf("SaveSnapshotToFile() error = %v", err)
+	}
+
+	stats := internalusage.GetRequestStatistics()
+	for i := range 225 {
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      "live-key",
+			Model:       "gpt-5.4",
+			RequestedAt: storedTime.Add(time.Hour + time.Duration(i)*time.Minute),
+			Source:      "live-source",
+			AuthIndex:   "live-auth",
+			Detail:      coreusage.Detail{InputTokens: 1, TotalTokens: 1},
+		})
+	}
+
+	service := &Service{configPath: configPath}
+	if err := service.persistUsageSnapshot(); err != nil {
+		t.Fatalf("persistUsageSnapshot() error = %v", err)
+	}
+
+	loaded, err := internalusage.LoadSnapshotFromFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("LoadSnapshotFromFile() error = %v", err)
+	}
+	if loaded.TotalRequests != 1225 {
+		t.Fatalf("total requests = %d, want 1225", loaded.TotalRequests)
+	}
+	if loaded.TotalTokens != 1225 {
+		t.Fatalf("total tokens = %d, want 1225", loaded.TotalTokens)
+	}
+	if loaded.APIs["live-key"].TotalRequests != 225 {
+		t.Fatalf("live api requests = %d, want 225", loaded.APIs["live-key"].TotalRequests)
+	}
+	if loaded.APIs["live-key"].TotalTokens != 225 {
+		t.Fatalf("live api tokens = %d, want 225", loaded.APIs["live-key"].TotalTokens)
+	}
+	if got := len(loaded.APIs["live-key"].Models["gpt-5.4"].Details); got != 200 {
+		t.Fatalf("live details len = %d, want 200", got)
+	}
+}
+
 func TestServiceRunRestoresStoredAuthRuntimeSnapshotAndRegistersModels(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 

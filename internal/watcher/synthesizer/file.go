@@ -12,6 +12,7 @@ import (
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/runtime/geminicli"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -158,6 +159,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	applyAuthAllowedModelsMeta(a, extractAllowedModelsFromMetadata(metadata))
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, extract plan_type from the JWT id_token.
@@ -221,6 +223,12 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			"runtime_only":           "true",
 			"gemini_virtual_parent":  primary.ID,
 			"gemini_virtual_project": projectID,
+		}
+		propagate := []string{"models", "models_hash"}
+		for _, key := range propagate {
+			if value := strings.TrimSpace(primary.Attributes[key]); value != "" {
+				attrs[key] = value
+			}
 		}
 		if source != "" {
 			attrs["source"] = source
@@ -318,38 +326,89 @@ func buildGeminiVirtualID(baseID, projectID string) string {
 }
 
 // extractExcludedModelsFromMetadata reads per-account excluded models from the OAuth JSON metadata.
-// Supports both "excluded_models" and "excluded-models" keys, and accepts both []string and []interface{}.
+// Supports both "excluded_models" and "excluded-models" keys, and accepts string or object arrays.
 func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
 	if metadata == nil {
 		return nil
 	}
-	// Try both key formats
-	raw, ok := metadata["excluded_models"]
-	if !ok {
-		raw, ok = metadata["excluded-models"]
+	for _, key := range []string{"excluded_models", "excluded-models"} {
+		if raw, ok := metadata[key]; ok {
+			if models := normalizeMetadataStringList(raw); len(models) > 0 {
+				return models
+			}
+		}
 	}
-	if !ok || raw == nil {
+	return nil
+}
+
+func normalizeMetadataStringList(raw any) []string {
+	if raw == nil {
 		return nil
 	}
-	var stringSlice []string
+	var candidates []string
 	switch v := raw.(type) {
 	case []string:
-		stringSlice = v
-	case []interface{}:
-		stringSlice = make([]string, 0, len(v))
+		candidates = append(candidates, v...)
+	case []any:
+		candidates = make([]string, 0, len(v))
 		for _, item := range v {
-			if s, ok := item.(string); ok {
-				stringSlice = append(stringSlice, s)
+			switch typed := item.(type) {
+			case string:
+				candidates = append(candidates, typed)
+			case map[string]any:
+				alias, _ := typed["alias"].(string)
+				name, _ := typed["name"].(string)
+				if strings.TrimSpace(alias) != "" {
+					candidates = append(candidates, alias)
+				} else {
+					candidates = append(candidates, name)
+				}
 			}
 		}
 	default:
 		return nil
 	}
-	result := make([]string, 0, len(stringSlice))
-	for _, s := range stringSlice {
-		if trimmed := strings.TrimSpace(s); trimmed != "" {
-			result = append(result, trimmed)
+
+	result := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed == "" {
+			continue
 		}
+		key := strings.ToLower(trimmed)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, trimmed)
 	}
 	return result
+}
+
+func extractAllowedModelsFromMetadata(metadata map[string]any) []string {
+	if metadata == nil {
+		return nil
+	}
+	for _, key := range []string{"models", "allowed_models", "allowed-models"} {
+		if raw, ok := metadata[key]; ok {
+			if models := normalizeMetadataStringList(raw); len(models) > 0 {
+				return models
+			}
+		}
+	}
+	return nil
+}
+
+func applyAuthAllowedModelsMeta(auth *coreauth.Auth, models []string) {
+	if auth == nil || len(models) == 0 {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["models"] = strings.Join(models, ",")
+	if hash := diff.ComputeAllowedModelsHash(models); hash != "" {
+		auth.Attributes["models_hash"] = hash
+	}
 }

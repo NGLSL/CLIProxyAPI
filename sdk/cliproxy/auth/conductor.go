@@ -654,6 +654,68 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	return available, nil
 }
 
+func (m *Manager) availableAuthsForPreferredSource(auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, error) {
+	preference := m.legacySourcePreference()
+	order := legacySourcePreferenceOrder(preference)
+	if len(order) == 0 {
+		return m.availableAuthsForRouteModel(auths, provider, routeModel, now)
+	}
+
+	for _, sourceType := range order {
+		filtered := filterAuthsBySourceType(auths, sourceType)
+		if len(filtered) == 0 {
+			continue
+		}
+		available, errAvailable := m.availableAuthsForRouteModel(filtered, provider, routeModel, now)
+		if errAvailable == nil && len(available) > 0 {
+			return available, nil
+		}
+	}
+	return m.availableAuthsForRouteModel(auths, provider, routeModel, now)
+}
+
+func (m *Manager) legacySourcePreference() routingSourcePreference {
+	if m == nil {
+		return routingSourcePreferenceNone
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return routingSourcePreferenceNone
+	}
+	return normalizeSchedulerSourcePreference(cfg.Routing.SourcePreference)
+}
+
+func legacySourcePreferenceOrder(preference routingSourcePreference) []authSourceType {
+	switch preference {
+	case routingSourcePreferenceAPIFirst:
+		return []authSourceType{authSourceTypeAPI, authSourceTypeFile}
+	case routingSourcePreferenceFileFirst:
+		return []authSourceType{authSourceTypeFile, authSourceTypeAPI}
+	default:
+		return nil
+	}
+}
+
+func filterAuthsBySourceType(auths []*Auth, sourceType authSourceType) []*Auth {
+	if len(auths) == 0 || sourceType == "" {
+		return nil
+	}
+	filtered := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if authSourceTypeForLegacy(auth) == sourceType {
+			filtered = append(filtered, auth)
+		}
+	}
+	return filtered
+}
+
+func authSourceTypeForLegacy(auth *Auth) authSourceType {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	return normalizeAuthSourceType(auth.Attributes["source_type"])
+}
+
 func selectionArgForSelector(selector Selector, routeModel string) string {
 	if isBuiltInSelector(selector) {
 		return ""
@@ -2679,7 +2741,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	now := time.Now()
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, now)
+	available, errAvailable := m.availableAuthsForPreferredSource(candidates, provider, model, now)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
@@ -2847,7 +2909,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	now := time.Now()
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, now)
+	available, errAvailable := m.availableAuthsForPreferredSource(candidates, "mixed", model, now)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable

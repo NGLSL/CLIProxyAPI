@@ -418,6 +418,77 @@ func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_AuthFileAllowedModels(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type": "gemini",
+		"models": []any{
+			"gemini-file-only",
+			map[string]any{"name": "upstream-name", "alias": "alias-name"},
+			"GEMINI-FILE-ONLY",
+		},
+	}
+	data, _ := json.Marshal(authData)
+	if errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644); errWriteFile != nil {
+		t.Fatalf("failed to write auth file: %v", errWriteFile)
+	}
+
+	auths, errSynthesize := NewFileSynthesizer().Synthesize(&SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if errSynthesize != nil {
+		t.Fatalf("unexpected error: %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got, want := auths[0].Attributes["models"], "gemini-file-only,alias-name"; got != want {
+		t.Fatalf("expected models %q, got %q", want, got)
+	}
+	if strings.TrimSpace(auths[0].Attributes["models_hash"]) == "" {
+		t.Fatal("expected models_hash to be set")
+	}
+}
+
+func TestFileSynthesizer_Synthesize_AllowedModelsAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "underscore", key: "allowed_models"},
+		{name: "dash", key: "allowed-models"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			authData := map[string]any{"type": "claude", testCase.key: []string{"claude-file-model"}}
+			data, _ := json.Marshal(authData)
+			if errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644); errWriteFile != nil {
+				t.Fatalf("failed to write auth file: %v", errWriteFile)
+			}
+
+			auths, errSynthesize := NewFileSynthesizer().Synthesize(&SynthesisContext{
+				Config:      &config.Config{},
+				AuthDir:     tempDir,
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			})
+			if errSynthesize != nil {
+				t.Fatalf("unexpected error: %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+			if got := auths[0].Attributes["models"]; got != "claude-file-model" {
+				t.Fatalf("expected models claude-file-model, got %q", got)
+			}
+		})
+	}
+}
+
 func TestSynthesizeGeminiVirtualAuths_NilInputs(t *testing.T) {
 	now := time.Now()
 
@@ -463,6 +534,8 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 			"source":       "test-source",
 			"path":         "/path/to/auth",
 			"header:X-Tra": "value",
+			"models":       "gemini-file-only,gemini-other",
+			"models_hash":  "hash-value",
 		},
 	}
 	metadata := map[string]any{
@@ -519,6 +592,12 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 		}
 		if got := v.Attributes["header:X-Tra"]; got != "value" {
 			t.Errorf("expected virtual %d header:X-Tra %q, got %q", i, "value", got)
+		}
+		if got := v.Attributes["models"]; got != "gemini-file-only,gemini-other" {
+			t.Errorf("expected virtual %d models to be propagated, got %q", i, got)
+		}
+		if got := v.Attributes["models_hash"]; got != "hash-value" {
+			t.Errorf("expected virtual %d models_hash to be propagated, got %q", i, got)
 		}
 		if v.Attributes["gemini_virtual_parent"] != "primary-id" {
 			t.Errorf("expected gemini_virtual_parent=primary-id, got %s", v.Attributes["gemini_virtual_parent"])
