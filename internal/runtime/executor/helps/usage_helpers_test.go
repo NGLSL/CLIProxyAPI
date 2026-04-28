@@ -51,6 +51,56 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageDeepSeek(t *testing.T) {
+	data := []byte(`{"usage":{"prompt_tokens":11,"completion_tokens":22,"total_tokens":33,"prompt_cache_hit_tokens":4,"prompt_cache_miss_tokens":7,"completion_tokens_details":{"reasoning_tokens":6}}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 11 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 11)
+	}
+	if detail.OutputTokens != 22 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 22)
+	}
+	if detail.TotalTokens != 33 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 33)
+	}
+	if detail.CachedTokens != 4 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
+	}
+	if detail.ReasoningTokens != 6 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 6)
+	}
+}
+
+func TestParseOpenAIStreamUsageSkipsNullUsage(t *testing.T) {
+	line := []byte(`data: {"choices":[{"delta":{"content":"hello"}}],"usage":null}`)
+	if detail, ok := ParseOpenAIStreamUsage(line); ok {
+		t.Fatalf("ParseOpenAIStreamUsage ok = true, detail = %+v, want false", detail)
+	}
+}
+
+func TestParseOpenAIStreamUsageDeepSeekFinalChunk(t *testing.T) {
+	line := []byte(`data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":22,"total_tokens":33,"prompt_cache_hit_tokens":4,"prompt_cache_miss_tokens":7,"completion_tokens_details":{"reasoning_tokens":6}}}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatalf("ParseOpenAIStreamUsage ok = false, want true")
+	}
+	if detail.InputTokens != 11 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 11)
+	}
+	if detail.OutputTokens != 22 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 22)
+	}
+	if detail.TotalTokens != 33 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 33)
+	}
+	if detail.CachedTokens != 4 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
+	}
+	if detail.ReasoningTokens != 6 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 6)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",

@@ -26,6 +26,27 @@ func copyRawJSONFields(dst []byte, root gjson.Result, fields ...string) []byte {
 	return dst
 }
 
+func extractResponsesReasoningText(item gjson.Result) string {
+	var parts []string
+	for _, path := range []string{"content", "summary"} {
+		value := item.Get(path)
+		if !value.Exists() || !value.IsArray() {
+			continue
+		}
+		value.ForEach(func(_, part gjson.Result) bool {
+			text := strings.TrimSpace(part.Get("text").String())
+			if text != "" {
+				parts = append(parts, text)
+			}
+			return true
+		})
+		if len(parts) > 0 {
+			break
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 // ConvertOpenAIResponsesRequestToOpenAIChatCompletions converts OpenAI responses format to OpenAI chat completions format.
 // It transforms the OpenAI responses API format (with instructions and input array) into the standard
 // OpenAI chat completions format (with messages array and system content).
@@ -92,6 +113,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		pendingReasoningContent := ""
 		input.ForEach(func(_, item gjson.Result) bool {
 			itemType := item.Get("type").String()
 			if itemType == "" && item.Get("role").String() != "" {
@@ -99,6 +121,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 
 			switch itemType {
+			case "reasoning":
+				pendingReasoningContent = extractResponsesReasoningText(item)
+
 			case "message", "":
 				// Handle regular message conversion
 				role := item.Get("role").String()
@@ -164,6 +189,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
 				}
 
+				if pendingReasoningContent != "" {
+					assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", pendingReasoningContent)
+					pendingReasoningContent = ""
+				}
 				assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.0", toolCall)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
 

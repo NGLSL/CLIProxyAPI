@@ -281,6 +281,13 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if !inputNode.Exists() {
 		inputNode = usageNode.Get("input_tokens")
 	}
+	if !inputNode.Exists() {
+		cacheHit := usageNode.Get("prompt_cache_hit_tokens")
+		cacheMiss := usageNode.Get("prompt_cache_miss_tokens")
+		if cacheHit.Exists() || cacheMiss.Exists() {
+			inputNode = gjson.Parse(fmt.Sprintf("%d", cacheHit.Int()+cacheMiss.Int()))
+		}
+	}
 	outputNode := usageNode.Get("completion_tokens")
 	if !outputNode.Exists() {
 		outputNode = usageNode.Get("output_tokens")
@@ -293,6 +300,9 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
 	if !cached.Exists() {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
+	}
+	if !cached.Exists() {
+		cached = usageNode.Get("prompt_cache_hit_tokens")
 	}
 	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
@@ -313,21 +323,10 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() {
+	if !usageNode.Exists() || !usageNode.IsObject() {
 		return usage.Detail{}, false
 	}
-	detail := usage.Detail{
-		InputTokens:  usageNode.Get("prompt_tokens").Int(),
-		OutputTokens: usageNode.Get("completion_tokens").Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
-	}
-	if cached := usageNode.Get("prompt_tokens_details.cached_tokens"); cached.Exists() {
-		detail.CachedTokens = cached.Int()
-	}
-	if reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens"); reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
-	}
-	return detail, true
+	return parseOpenAIStyleUsageNode(usageNode), true
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {

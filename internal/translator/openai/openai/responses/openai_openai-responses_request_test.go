@@ -95,3 +95,56 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsPreservesCompatible
 		t.Fatalf("tool_choice.function.name = %q, want %q", got, "lookup")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsReplaysReasoningForToolCall(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{
+				"type":"reasoning",
+				"content":[{"type":"reasoning_text","text":"需要先查询文件"}],
+				"summary":[]
+			},
+			{
+				"type":"function_call",
+				"call_id":"call_123",
+				"name":"Read",
+				"arguments":"{\"file_path\":\"demo.txt\"}"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_123",
+				"output":"file contents"
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-pro", raw, false)
+
+	assistantMessage := gjson.GetBytes(out, "messages.0")
+	if got := assistantMessage.Get("role").String(); got != "assistant" {
+		t.Fatalf("messages.0.role = %q, want %q", got, "assistant")
+	}
+	if got := assistantMessage.Get("reasoning_content").String(); got != "需要先查询文件" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "需要先查询文件")
+	}
+	if got := assistantMessage.Get("tool_calls.0.id").String(); got != "call_123" {
+		t.Fatalf("messages.0.tool_calls.0.id = %q, want %q", got, "call_123")
+	}
+	if got := assistantMessage.Get("tool_calls.0.function.name").String(); got != "Read" {
+		t.Fatalf("messages.0.tool_calls.0.function.name = %q, want %q", got, "Read")
+	}
+	if got := assistantMessage.Get("tool_calls.0.function.arguments").String(); got != "{\"file_path\":\"demo.txt\"}" {
+		t.Fatalf("messages.0.tool_calls.0.function.arguments = %q, want %q", got, "{\"file_path\":\"demo.txt\"}")
+	}
+
+	toolMessage := gjson.GetBytes(out, "messages.1")
+	if got := toolMessage.Get("role").String(); got != "tool" {
+		t.Fatalf("messages.1.role = %q, want %q", got, "tool")
+	}
+	if got := toolMessage.Get("tool_call_id").String(); got != "call_123" {
+		t.Fatalf("messages.1.tool_call_id = %q, want %q", got, "call_123")
+	}
+	if got := toolMessage.Get("content").String(); got != "file contents" {
+		t.Fatalf("messages.1.content = %q, want %q", got, "file contents")
+	}
+}
