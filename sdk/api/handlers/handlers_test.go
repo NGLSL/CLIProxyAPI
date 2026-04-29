@@ -65,6 +65,7 @@ func TestRequestExecutionMetadata_IncludesStickyRouteKey(t *testing.T) {
 		t.Fatalf("http.NewRequest() error = %v", err)
 	}
 	req.Header.Set("Idempotency-Key", "idem-1")
+	req.Header.Set(ampThreadIDHeader, "thread-should-not-win")
 	ginCtx.Request = req
 	ginCtx.Set("accessIndex", "access-idx-1")
 
@@ -88,6 +89,24 @@ func TestRequestExecutionMetadata_IncludesStickyRouteKey(t *testing.T) {
 	}
 	if _, ok := meta[coreexecutor.SelectedAuthCallbackMetadataKey].(func(string)); !ok {
 		t.Fatalf("selected auth callback missing or wrong type")
+	}
+}
+
+func TestRequestExecutionMetadata_IncludesAmpThreadStickyRouteKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	req, err := http.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	req.Header.Set(ampThreadIDHeader, "thread-1")
+	ginCtx.Request = req
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	meta := requestExecutionMetadata(ctx)
+	if got, _ := meta[coreexecutor.StickyRouteMetadataKey].(string); got != "amp:thread-1" {
+		t.Fatalf("sticky route key = %q, want %q", got, "amp:thread-1")
 	}
 }
 

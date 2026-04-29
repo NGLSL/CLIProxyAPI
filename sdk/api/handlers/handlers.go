@@ -47,7 +47,11 @@ type ErrorDetail struct {
 	Code string `json:"code,omitempty"`
 }
 
-const idempotencyKeyMetadataKey = "idempotency_key"
+const (
+	idempotencyKeyMetadataKey = "idempotency_key"
+	ampThreadIDHeader         = "X-Amp-Thread-Id"
+	ampStickyRoutePrefix      = "amp:"
+)
 
 const (
 	defaultStreamingKeepAliveSeconds = 0
@@ -273,17 +277,26 @@ func stickyRouteKeyFromGinContext(ginCtx *gin.Context) string {
 		return ""
 	}
 	raw, ok := ginCtx.Get("accessIndex")
-	if !ok || raw == nil {
+	if ok && raw != nil {
+		switch v := raw.(type) {
+		case string:
+			if key := strings.TrimSpace(v); key != "" {
+				return key
+			}
+		case []byte:
+			if key := strings.TrimSpace(string(v)); key != "" {
+				return key
+			}
+		default:
+		}
+	}
+	if ginCtx.Request == nil {
 		return ""
 	}
-	switch v := raw.(type) {
-	case string:
-		return strings.TrimSpace(v)
-	case []byte:
-		return strings.TrimSpace(string(v))
-	default:
-		return ""
+	if threadID := strings.TrimSpace(ginCtx.GetHeader(ampThreadIDHeader)); threadID != "" {
+		return ampStickyRoutePrefix + threadID
 	}
+	return ""
 }
 
 func pinnedAuthIDFromContext(ctx context.Context) string {
