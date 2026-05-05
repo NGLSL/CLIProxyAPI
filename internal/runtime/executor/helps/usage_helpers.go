@@ -310,6 +310,10 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	}
 	if !cached.Exists() {
 		cached = usageNode.Get("prompt_cache_hit_tokens")
+		// prompt_cache_hit_tokens 应为 input 子集，超过则说明上游返回异常值，忽略
+		if cached.Exists() && detail.InputTokens > 0 && cached.Int() > detail.InputTokens {
+			cached = gjson.Result{}
+		}
 	}
 	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
