@@ -355,16 +355,27 @@ func ParseClaudeUsage(data []byte) usage.Detail {
 	if !usageNode.Exists() {
 		return usage.Detail{}
 	}
+	return parseClaudeStyleUsageNode(usageNode)
+}
+
+func parseClaudeStyleUsageNode(usageNode gjson.Result) usage.Detail {
+	inputTokens := usageNode.Get("input_tokens").Int()
+	outputTokens := usageNode.Get("output_tokens").Int()
+	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
+	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
+	cachedTokens := cacheReadTokens
+	if cachedTokens == 0 {
+		// Keep the previous display fallback for cache creation when no cache read is reported.
+		cachedTokens = cacheCreationTokens
+	}
+
+	inputTokens += cacheReadTokens + cacheCreationTokens
 	detail := usage.Detail{
-		InputTokens:  usageNode.Get("input_tokens").Int(),
-		OutputTokens: usageNode.Get("output_tokens").Int(),
-		CachedTokens: usageNode.Get("cache_read_input_tokens").Int(),
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		CachedTokens: cachedTokens,
+		TotalTokens:  inputTokens + outputTokens,
 	}
-	if detail.CachedTokens == 0 {
-		// fall back to creation tokens when read tokens are absent
-		detail.CachedTokens = usageNode.Get("cache_creation_input_tokens").Int()
-	}
-	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	return detail
 }
 
@@ -377,16 +388,7 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
-	detail := usage.Detail{
-		InputTokens:  usageNode.Get("input_tokens").Int(),
-		OutputTokens: usageNode.Get("output_tokens").Int(),
-		CachedTokens: usageNode.Get("cache_read_input_tokens").Int(),
-	}
-	if detail.CachedTokens == 0 {
-		detail.CachedTokens = usageNode.Get("cache_creation_input_tokens").Int()
-	}
-	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
-	return detail, true
+	return parseClaudeStyleUsageNode(usageNode), true
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
