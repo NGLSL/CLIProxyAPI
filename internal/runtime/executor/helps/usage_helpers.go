@@ -292,44 +292,40 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if !outputNode.Exists() {
 		outputNode = usageNode.Get("output_tokens")
 	}
+
+	inputTokens := inputNode.Int()
+	cachedTokens := int64(0)
 	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
 	if !cached.Exists() {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
 	}
-	if !cached.Exists() {
-		cached = usageNode.Get("prompt_cache_hit_tokens")
-	}
-
-	// 部分上游（如 DeepSeek）用 split 语义：prompt_tokens 只报非缓存项，
-	// prompt_cache_hit_tokens 报缓存命中项，此时 cached > input 是合法的。
-	// 真实 input = 非缓存项 + 缓存项，需要合并两者。
-	inputTokens := inputNode.Int()
-	cachedTokens := int64(0)
 	if cached.Exists() {
 		cachedTokens = cached.Int()
 	}
-	if cachedTokens > 0 && cachedTokens > inputTokens && inputTokens > 0 {
-		// 上游使用 split 语义：input 不包含缓存，需要合并
-		inputTokens = inputTokens + cachedTokens
-	}
 
-	// 兜底：input 字段完全缺失时，从 cache_hit + cache_miss 计算
-	if inputTokens == 0 {
-		cacheHit := usageNode.Get("prompt_cache_hit_tokens")
-		cacheMiss := usageNode.Get("prompt_cache_miss_tokens")
-		if cacheHit.Exists() || cacheMiss.Exists() {
-			inputTokens = cacheHit.Int() + cacheMiss.Int()
+	cacheHit := usageNode.Get("prompt_cache_hit_tokens")
+	cacheMiss := usageNode.Get("prompt_cache_miss_tokens")
+	hasCacheSplit := cacheHit.Exists() || cacheMiss.Exists()
+	if hasCacheSplit {
+		hitTokens := cacheHit.Int()
+		missTokens := cacheMiss.Int()
+		cachedTokens = hitTokens
+		if cacheMiss.Exists() {
+			inputTokens = hitTokens + missTokens
+		} else if inputTokens == 0 || hitTokens > inputTokens {
+			// DeepSeek reports cache-hit and cache-miss tokens as request input parts.
+			// Some responses keep prompt_tokens on the miss-only total, so add hit tokens only in that split case.
+			inputTokens += hitTokens
 		}
 	}
 
 	detail := usage.Detail{
 		InputTokens:  inputTokens,
 		OutputTokens: outputNode.Int(),
+		CachedTokens: cachedTokens,
 		TotalTokens:  usageNode.Get("total_tokens").Int(),
 	}
-	detail.CachedTokens = cachedTokens
-	// total_tokens 在上游 split 语义下也可能只算了非缓存项，补齐
-	if detail.TotalTokens < detail.InputTokens+detail.OutputTokens {
+	if hasCacheSplit && detail.TotalTokens < detail.InputTokens+detail.OutputTokens {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	}
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
