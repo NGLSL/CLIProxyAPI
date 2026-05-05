@@ -62,6 +62,10 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - Claude Code multi-account load balancing
 - OpenAI Codex multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
+- OpenAI Responses API support, including `/v1/responses/compact` and Responses WebSocket continuation/compaction replay
+- OpenAI-compatible reasoning/thinking parameters apply request suffixes before config overrides, so config remains authoritative
+- Claude Code OAuth tool names are restored per request to avoid rewriting mixed-case tool names in responses
+- Local usage statistics and management import/export remain enabled; model aliases are recorded in details while aggregation stays keyed by the executed model
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
 ## Getting Started

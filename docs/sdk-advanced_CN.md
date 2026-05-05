@@ -115,6 +115,13 @@ cliproxy.GlobalModelRegistry().RegisterClient(authID, "myprov", models)
 
 内置 Provider 会自动注册；自定义 Provider 建议在启动时（例如加载到 Auth 后）或在 Auth 注册钩子中调用。
 
+## 内置兼容行为
+
+- OpenAI 兼容执行器会先应用模型后缀里的 reasoning/thinking，再应用 payload 配置覆盖。因此即使客户端请求 `(high)` 这类后缀，配置里的覆盖项仍然拥有最终优先级。
+- OpenAI Responses 支持 `/v1/responses/compact`；Responses WebSocket 会保留会话延续状态，并且只在所选上游支持时启用压缩回放。
+- Claude OAuth 工具名改写按单次请求记录。只有本次出站请求中被改写过的名称才会在非流式和流式响应里恢复，客户端原本传入的 TitleCase 工具名不会被误改。
+- 用量记录按实际执行模型聚合。客户端请求的 alias 会写入请求明细，供界面展示和排查使用，但不会改变聚合键。
+
 ## 凭据与传输
 
 - 使用 `Manager.SetRoundTripperProvider` 注入按账户的 `*http.Transport`（例如代理）：

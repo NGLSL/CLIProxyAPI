@@ -62,6 +62,10 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 - 支持 Claude Code 多账户轮询
 - 支持 OpenAI Codex 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
+- 支持 OpenAI Responses API（含 `/v1/responses/compact`）与 Responses WebSocket 会话延续/压缩回放
+- OpenAI 兼容上游的 reasoning/thinking 参数按“请求后缀先应用、配置覆盖后应用”处理，便于统一管控
+- Claude Code OAuth 工具名按单次请求恢复，避免混合大小写工具名在响应中被错误改写
+- 保留本地用量统计与管理端导入/导出；模型 alias 记录在明细中，统计聚合仍按实际执行模型计算
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 
 ## 新手入门

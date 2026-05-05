@@ -122,6 +122,13 @@ cliproxy.GlobalModelRegistry().RegisterClient(authID, "myprov", models)
 
 The embedded server calls this automatically for built‑in providers; for custom providers, register during startup (e.g., after loading auths) or upon auth registration hooks.
 
+## Built-in Compatibility Behavior
+
+- OpenAI-compatible executors apply model suffix reasoning/thinking first, then apply payload config overrides. This keeps configured overrides authoritative even when the client requests a suffix such as `(high)`.
+- OpenAI Responses supports `/v1/responses/compact`; Responses WebSocket keeps continuation state and only uses compaction replay when the selected upstream supports it.
+- Claude OAuth tool-name remapping is request-scoped. Only names rewritten on the outbound request are restored in non-stream and streaming responses, so already TitleCase tool names stay unchanged.
+- Usage records aggregate by the actual executed model. Requested aliases are stored in request details for UI and debugging without changing aggregation keys.
+
 ## Credentials & Transports
 
 - Use `Manager.SetRoundTripperProvider` to inject per‑auth `*http.Transport` (e.g., proxy):

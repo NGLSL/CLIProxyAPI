@@ -101,6 +101,7 @@ type RequestDetail struct {
 	ResponseBytes      int64      `json:"response_bytes"`
 	APIResponseBytes   int64      `json:"api_response_bytes"`
 	Source             string     `json:"source"`
+	Alias              string     `json:"alias,omitempty"`
 	AuthIndex          string     `json:"auth_index"`
 	Tokens             TokenStats `json:"tokens"`
 	Failed             bool       `json:"failed"`
@@ -205,7 +206,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		failed = !resolveSuccess(ctx)
 	}
 	success := !failed
-	modelName := record.Model
+	modelName := strings.TrimSpace(record.Model)
 	if modelName == "" {
 		modelName = "unknown"
 	}
@@ -236,6 +237,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		ResponseBytes:      normaliseNonNegative(record.ResponseBytes),
 		APIResponseBytes:   normaliseNonNegative(record.APIResponseBytes),
 		Source:             record.Source,
+		Alias:              strings.TrimSpace(record.Alias),
 		AuthIndex:          record.AuthIndex,
 		Tokens:             detail,
 		Failed:             failed,
