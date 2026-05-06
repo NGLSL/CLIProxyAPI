@@ -12,6 +12,7 @@ import (
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -293,6 +294,31 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 	}
 }
 
+func selectorForRoutingStrategy(strategy string) coreauth.Selector {
+	normalized, ok := normalizeRoutingStrategy(strategy)
+	if !ok {
+		normalized = "round-robin"
+	}
+	switch normalized {
+	case "fill-first":
+		return &coreauth.FillFirstSelector{}
+	case "sticky-round-robin":
+		return &coreauth.StickyRoundRobinSelector{}
+	default:
+		return &coreauth.RoundRobinSelector{}
+	}
+}
+
+func (h *Handler) applyRoutingStrategyRuntime(strategy string) {
+	if h == nil || h.authManager == nil {
+		return
+	}
+	h.authManager.SetSelector(selectorForRoutingStrategy(strategy))
+	if h.cfg != nil {
+		h.authManager.SetConfig(h.cfg)
+	}
+}
+
 // RoutingStrategy
 func (h *Handler) GetRoutingStrategy(c *gin.Context) {
 	strategy, ok := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
@@ -316,7 +342,9 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 		return
 	}
 	h.cfg.Routing.Strategy = normalized
-	h.persist(c)
+	if h.persist(c) {
+		h.applyRoutingStrategyRuntime(normalized)
+	}
 }
 
 // Proxy URL
