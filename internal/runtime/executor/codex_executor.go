@@ -1030,37 +1030,13 @@ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.Code
 	if auth == nil || e.cfg == nil {
 		return nil
 	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	attrKey, attrBase := codexConfigLookupAttrs(auth)
+	return e.cfg.ResolveCodexKey(attrKey, attrBase)
+}
+
+func codexConfigLookupAttrs(auth *cliproxyauth.Auth) (apiKey, baseURL string) {
+	if auth == nil || auth.Attributes == nil {
+		return "", ""
 	}
-	for i := range e.cfg.CodexKey {
-		entry := &e.cfg.CodexKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	if attrKey != "" {
-		for i := range e.cfg.CodexKey {
-			entry := &e.cfg.CodexKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-				return entry
-			}
-		}
-	}
-	return nil
+	return strings.TrimSpace(auth.Attributes["api_key"]), strings.TrimSpace(auth.Attributes["base_url"])
 }

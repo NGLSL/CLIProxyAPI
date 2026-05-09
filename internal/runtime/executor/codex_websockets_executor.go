@@ -913,39 +913,8 @@ func resolveCodexConfigForWebsocket(auth *cliproxyauth.Auth, cfg *config.Config)
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range cfg.CodexKey {
-		entry := &cfg.CodexKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	if attrKey != "" {
-		for i := range cfg.CodexKey {
-			entry := &cfg.CodexKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-				return entry
-			}
-		}
-	}
-	return nil
+	attrKey, attrBase := codexConfigLookupAttrs(auth)
+	return cfg.ResolveCodexKey(attrKey, attrBase)
 }
 
 func codexWebsocketCustomHeaderValue(auth *cliproxyauth.Auth, name string) string {

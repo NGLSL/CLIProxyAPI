@@ -178,6 +178,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if len(oldCfg.CodexKey) != len(newCfg.CodexKey) {
 		changes = append(changes, fmt.Sprintf("codex-api-key count: %d -> %d", len(oldCfg.CodexKey), len(newCfg.CodexKey)))
 	} else {
+		oldCodexCredentialCount := oldCfg.CountCodexAPIKeyEntries()
+		newCodexCredentialCount := newCfg.CountCodexAPIKeyEntries()
+		if oldCodexCredentialCount != newCodexCredentialCount {
+			changes = append(changes, fmt.Sprintf("codex-api-key credentials: %d -> %d", oldCodexCredentialCount, newCodexCredentialCount))
+		}
 		for i := range oldCfg.CodexKey {
 			o := oldCfg.CodexKey[i]
 			n := newCfg.CodexKey[i]
@@ -195,6 +200,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("codex[%d].api-key: updated", i))
+			}
+			if summarizeCodexAPIKeyEntries(o.APIKeyEntries) != summarizeCodexAPIKeyEntries(n.APIKeyEntries) {
+				changes = append(changes, fmt.Sprintf("codex[%d].api-key-entries: updated", i))
 			}
 			if !equalStringMap(o.Headers, n.Headers) {
 				changes = append(changes, fmt.Sprintf("codex[%d].headers: updated", i))
@@ -342,6 +350,19 @@ func equalStringMap(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func summarizeCodexAPIKeyEntries(entries []config.CodexAPIKeyEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		keyPresent := strings.TrimSpace(entry.APIKey) != ""
+		parts = append(parts, fmt.Sprintf("key=%t|proxy=%s|headers=%d", keyPresent, formatProxyURL(entry.ProxyURL), len(config.NormalizeHeaders(entry.Headers))))
+	}
+	return strings.Join(parts, ";")
 }
 
 func formatProxyURL(raw string) string {

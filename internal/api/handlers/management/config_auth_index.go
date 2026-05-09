@@ -20,11 +20,17 @@ type claudeKeyWithAuthIndex struct {
 
 type codexKeyWithAuthIndex struct {
 	config.CodexKey
-	AuthIndex string `json:"auth-index,omitempty"`
+	APIKeyEntries []codexAPIKeyEntryWithAuthIndex `json:"api-key-entries,omitempty"`
+	AuthIndex     string                          `json:"auth-index,omitempty"`
 }
 
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
+type codexAPIKeyEntryWithAuthIndex struct {
+	config.CodexAPIKeyEntry
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
@@ -152,15 +158,25 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 	out := make([]codexKeyWithAuthIndex, len(h.cfg.CodexKey))
 	for i := range h.cfg.CodexKey {
 		entry := h.cfg.CodexKey[i]
-		authIndex := ""
-		if key := strings.TrimSpace(entry.APIKey); key != "" {
-			id, _ := idGen.Next("codex:apikey", key, entry.BaseURL)
-			authIndex = liveIndexByID[id]
+		response := codexKeyWithAuthIndex{
+			CodexKey: entry,
 		}
-		out[i] = codexKeyWithAuthIndex{
-			CodexKey:  entry,
-			AuthIndex: authIndex,
+		effectiveEntries := entry.EffectiveAPIKeyEntries()
+		if len(entry.APIKeyEntries) > 0 {
+			response.APIKeyEntries = make([]codexAPIKeyEntryWithAuthIndex, len(effectiveEntries))
+			for j := range effectiveEntries {
+				apiKeyEntry := effectiveEntries[j]
+				id, _ := idGen.Next("codex:apikey", apiKeyEntry.APIKey, entry.BaseURL)
+				response.APIKeyEntries[j] = codexAPIKeyEntryWithAuthIndex{
+					CodexAPIKeyEntry: apiKeyEntry,
+					AuthIndex:        liveIndexByID[id],
+				}
+			}
+		} else if len(effectiveEntries) > 0 {
+			id, _ := idGen.Next("codex:apikey", effectiveEntries[0].APIKey, entry.BaseURL)
+			response.AuthIndex = liveIndexByID[id]
 		}
+		out[i] = response
 	}
 	return out
 }

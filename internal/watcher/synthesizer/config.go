@@ -143,47 +143,52 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 	now := ctx.Now
 	idGen := ctx.IDGenerator
 
-	out := make([]*coreauth.Auth, 0, len(cfg.CodexKey))
+	out := make([]*coreauth.Auth, 0, cfg.CountCodexAPIKeyEntries())
 	for i := range cfg.CodexKey {
 		ck := cfg.CodexKey[i]
-		key := strings.TrimSpace(ck.APIKey)
-		if key == "" {
-			continue
-		}
 		prefix := strings.TrimSpace(ck.Prefix)
-		id, token := idGen.Next("codex:apikey", key, ck.BaseURL)
-		attrs := map[string]string{
-			"source":      fmt.Sprintf("config:codex[%s]", token),
-			"source_type": "api",
-			"api_key":     key,
+		for _, keyEntry := range ck.EffectiveAPIKeyEntries() {
+			key := strings.TrimSpace(keyEntry.APIKey)
+			if key == "" {
+				continue
+			}
+			// Codex 旧配置的 Auth ID 只由 key + base-url 决定。多 key 展开仍沿用
+			// 同一规则，避免用户把单 key 迁移到 api-key-entries 后丢失运行态索引。
+			id, token := idGen.Next("codex:apikey", key, ck.BaseURL)
+			attrs := map[string]string{
+				"source":      fmt.Sprintf("config:codex[%s]", token),
+				"source_type": "api",
+				"api_key":     key,
+			}
+			if ck.Priority != 0 {
+				attrs["priority"] = strconv.Itoa(ck.Priority)
+			}
+			if ck.BaseURL != "" {
+				attrs["base_url"] = ck.BaseURL
+			}
+			if ck.Websockets {
+				attrs["websockets"] = "true"
+			}
+			if hash := diff.ComputeCodexModelsHash(ck.Models); hash != "" {
+				attrs["models_hash"] = hash
+			}
+			addConfigHeadersToAttrs(ck.Headers, attrs)
+			addConfigHeadersToAttrs(keyEntry.Headers, attrs)
+			proxyURL := ck.EffectiveProxyURLForEntry(keyEntry)
+			a := &coreauth.Auth{
+				ID:         id,
+				Provider:   "codex",
+				Label:      "codex-apikey",
+				Prefix:     prefix,
+				Status:     coreauth.StatusActive,
+				ProxyURL:   proxyURL,
+				Attributes: attrs,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}
+			ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
+			out = append(out, a)
 		}
-		if ck.Priority != 0 {
-			attrs["priority"] = strconv.Itoa(ck.Priority)
-		}
-		if ck.BaseURL != "" {
-			attrs["base_url"] = ck.BaseURL
-		}
-		if ck.Websockets {
-			attrs["websockets"] = "true"
-		}
-		if hash := diff.ComputeCodexModelsHash(ck.Models); hash != "" {
-			attrs["models_hash"] = hash
-		}
-		addConfigHeadersToAttrs(ck.Headers, attrs)
-		proxyURL := strings.TrimSpace(ck.ProxyURL)
-		a := &coreauth.Auth{
-			ID:         id,
-			Provider:   "codex",
-			Label:      "codex-apikey",
-			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
-			ProxyURL:   proxyURL,
-			Attributes: attrs,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
-		out = append(out, a)
 	}
 	return out
 }

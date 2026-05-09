@@ -1749,15 +1749,18 @@ type APIKeyConfigEntry interface {
 	GetBaseURL() string
 }
 
+func apiKeyConfigLookupAttrs(auth *Auth) (apiKey, baseURL string) {
+	if auth == nil || auth.Attributes == nil {
+		return "", ""
+	}
+	return strings.TrimSpace(auth.Attributes["api_key"]), strings.TrimSpace(auth.Attributes["base_url"])
+}
+
 func resolveAPIKeyConfig[T APIKeyConfigEntry](entries []T, auth *Auth) *T {
 	if auth == nil || len(entries) == 0 {
 		return nil
 	}
-	attrKey, attrBase := "", ""
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
+	attrKey, attrBase := apiKeyConfigLookupAttrs(auth)
 	for i := range entries {
 		entry := &entries[i]
 		cfgKey := strings.TrimSpace((*entry).GetAPIKey())
@@ -1806,7 +1809,8 @@ func resolveCodexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalc
 	if cfg == nil {
 		return nil
 	}
-	return resolveAPIKeyConfig(cfg.CodexKey, auth)
+	apiKey, baseURL := apiKeyConfigLookupAttrs(auth)
+	return cfg.ResolveCodexKey(apiKey, baseURL)
 }
 
 func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.VertexCompatKey {

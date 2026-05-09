@@ -1016,7 +1016,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	authEntries := util.CountAuthFiles(context.Background(), tokenStore)
 	geminiAPIKeyCount := len(cfg.GeminiKey)
 	claudeAPIKeyCount := len(cfg.ClaudeKey)
-	codexAPIKeyCount := len(cfg.CodexKey)
+	codexAPIKeyCount := cfg.CountCodexAPIKeyEntries()
 	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
 	openAICompatCount := 0
 	for i := range cfg.OpenAICompatibility {
