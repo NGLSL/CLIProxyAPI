@@ -1059,8 +1059,8 @@ func dedupeToolOutputs(body []byte) []byte {
 	}
 
 	arr := inputItems.Array()
-	seenCallIDs := make(map[string]struct{}, len(arr))
-	dupes := make(map[int]bool)
+	lastIdxByCallID := make(map[string]int, len(arr))
+	toolOutputIdx := make([]int, 0, len(arr))
 
 	for i, item := range arr {
 		typ := item.Get("type").String()
@@ -1071,11 +1071,22 @@ func dedupeToolOutputs(body []byte) []byte {
 		if callID == "" {
 			continue
 		}
-		if _, exists := seenCallIDs[callID]; exists {
-			dupes[i] = true
-			continue
+		toolOutputIdx = append(toolOutputIdx, i)
+		lastIdxByCallID[callID] = i // 最后一次出现覆盖前面的
+	}
+
+	// 构建保留集合：每个 call_id 只保留最后出现的那一项
+	keep := make(map[int]bool, len(lastIdxByCallID))
+	for _, idx := range lastIdxByCallID {
+		keep[idx] = true
+	}
+
+	// 统计需要移除的项
+	dupes := make(map[int]bool)
+	for _, idx := range toolOutputIdx {
+		if !keep[idx] {
+			dupes[idx] = true
 		}
-		seenCallIDs[callID] = struct{}{}
 	}
 
 	if len(dupes) == 0 {

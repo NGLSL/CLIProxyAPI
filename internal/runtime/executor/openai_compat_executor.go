@@ -333,6 +333,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, fmt.Errorf("openai compat executor: prepare payload: %w", err)
 	}
 
+	// 防御性去重：多 Key / 重试时翻译链可能重复写入 tool output。
+	translated = dedupeToolOutputs(translated)
+
 	upstreamURL := strings.TrimSuffix(baseURL, "/") + endpoint
 	parsedURL, err := url.Parse(upstreamURL)
 	if err != nil {
@@ -442,6 +445,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		return nil, fmt.Errorf("openai compat executor: prepare payload: %w", err)
 	}
+
+	// 防御性去重：多 Key / 重试时翻译链可能重复写入 tool output。
+	translated = dedupeToolOutputs(translated)
 
 	upstreamURL := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	parsedURL, err := url.Parse(upstreamURL)
