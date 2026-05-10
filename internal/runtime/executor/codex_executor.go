@@ -183,6 +183,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = normalizeCodexInstructions(body)
 	body = ensureImageGenerationTool(body, baseModel, auth)
 
+	// 防御性去重：翻译链中可能因多 Key / 多层处理导致 input 数组里
+	// 同一个 call_id 的 function_call_output 或 tool_search_output 被重复写入。
+	// 在所有请求体变换完成后做一次最终去重，避免模型收到重复工具结果。
+	body = dedupeToolOutputs(body)
+
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
@@ -425,6 +430,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
 	body = ensureImageGenerationTool(body, baseModel, auth)
+
+	// 防御性去重：同 Execute 方法，防止 input 中工具输出重复。
+	body = dedupeToolOutputs(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -1039,4 +1047,60 @@ func codexConfigLookupAttrs(auth *cliproxyauth.Auth) (apiKey, baseURL string) {
 		return "", ""
 	}
 	return strings.TrimSpace(auth.Attributes["api_key"]), strings.TrimSpace(auth.Attributes["base_url"])
+}
+
+// dedupeToolOutputs 移除 input 数组中 call_id 重复的 function_call_output
+// 和 tool_search_output 项（保留首次出现），防止上游翻译链或重试逻辑
+// 导致模型收到重复工具结果。
+func dedupeToolOutputs(body []byte) []byte {
+	inputItems := gjson.GetBytes(body, "input")
+	if !inputItems.IsArray() {
+		return body
+	}
+
+	arr := inputItems.Array()
+	seenCallIDs := make(map[string]struct{}, len(arr))
+	dupes := make(map[int]bool)
+
+	for i, item := range arr {
+		typ := item.Get("type").String()
+		if typ != "function_call_output" && typ != "tool_search_output" {
+			continue
+		}
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		if callID == "" {
+			continue
+		}
+		if _, exists := seenCallIDs[callID]; exists {
+			dupes[i] = true
+			continue
+		}
+		seenCallIDs[callID] = struct{}{}
+	}
+
+	if len(dupes) == 0 {
+		return body
+	}
+
+	// 重建 input 数组，跳过标记为重复的索引
+	filtered := make([]byte, 0, len(inputItems.Raw))
+	filtered = append(filtered, '[')
+	first := true
+	for i, item := range arr {
+		if dupes[i] {
+			continue
+		}
+		if !first {
+			filtered = append(filtered, ',')
+		}
+		filtered = append(filtered, []byte(item.Raw)...)
+		first = false
+	}
+	filtered = append(filtered, ']')
+
+	out, err := sjson.SetRawBytes(body, "input", filtered)
+	if err != nil {
+		return body
+	}
+	return out
 }
