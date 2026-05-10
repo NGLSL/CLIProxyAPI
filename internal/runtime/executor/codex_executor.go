@@ -1049,55 +1049,74 @@ func codexConfigLookupAttrs(auth *cliproxyauth.Auth) (apiKey, baseURL string) {
 	return strings.TrimSpace(auth.Attributes["api_key"]), strings.TrimSpace(auth.Attributes["base_url"])
 }
 
-// dedupeToolOutputs 移除 input 数组中 call_id 重复的 function_call_output
-// 和 tool_search_output 项（保留首次出现），防止上游翻译链或重试逻辑
-// 导致模型收到重复工具结果。
+// dedupeToolOutputs 移除工具结果数组中 call_id / tool_call_id 重复的项（保留最后一次出现）。
+// 同时兼容两种上游格式：
+//   - Responses 格式：input[].{type, call_id}  （type 为 function_call_output / tool_search_output）
+//   - Chat 格式：     messages[].{role, tool_call_id}（role 为 tool）
 func dedupeToolOutputs(body []byte) []byte {
-	inputItems := gjson.GetBytes(body, "input")
-	if !inputItems.IsArray() {
-		return body
+	// ---- Responses 格式 ----
+	if inputItems := gjson.GetBytes(body, "input"); inputItems.IsArray() {
+		if deduped, changed := dedupeInputArray(inputItems, "type", "call_id", "function_call_output", "tool_search_output"); changed {
+			body, _ = sjson.SetRawBytes(body, "input", deduped)
+		}
 	}
 
-	arr := inputItems.Array()
-	lastIdxByCallID := make(map[string]int, len(arr))
-	toolOutputIdx := make([]int, 0, len(arr))
-
-	for i, item := range arr {
-		typ := item.Get("type").String()
-		if typ != "function_call_output" && typ != "tool_search_output" {
-			continue
+	// ---- Chat Completions 格式 ----
+	if messages := gjson.GetBytes(body, "messages"); messages.IsArray() {
+		if deduped, changed := dedupeInputArray(messages, "role", "tool_call_id", "tool"); changed {
+			body, _ = sjson.SetRawBytes(body, "messages", deduped)
 		}
-		callID := strings.TrimSpace(item.Get("call_id").String())
-		if callID == "" {
-			continue
-		}
-		toolOutputIdx = append(toolOutputIdx, i)
-		lastIdxByCallID[callID] = i // 最后一次出现覆盖前面的
 	}
 
-	// 构建保留集合：每个 call_id 只保留最后出现的那一项
-	keep := make(map[int]bool, len(lastIdxByCallID))
-	for _, idx := range lastIdxByCallID {
+	return body
+}
+
+// dedupeInputArray 对数组中匹配指定 keyField 和 matchTypes 的项按 idField 去重，
+// 保留最后一次出现。返回重建后的 JSON 数组字节和是否有变更。
+func dedupeInputArray(arr gjson.Result, typeField, idField string, matchTypes ...string) ([]byte, bool) {
+	items := arr.Array()
+	lastIdxByID := make(map[string]int, len(items))
+	outputIdx := make([]int, 0, len(items))
+
+	matchSet := make(map[string]struct{}, len(matchTypes))
+	for _, t := range matchTypes {
+		matchSet[t] = struct{}{}
+	}
+
+	for i, item := range items {
+		typ := item.Get(typeField).String()
+		if _, ok := matchSet[typ]; !ok {
+			continue
+		}
+		id := strings.TrimSpace(item.Get(idField).String())
+		if id == "" {
+			continue
+		}
+		outputIdx = append(outputIdx, i)
+		lastIdxByID[id] = i // 最后出现覆盖前面的
+	}
+
+	keep := make(map[int]bool, len(lastIdxByID))
+	for _, idx := range lastIdxByID {
 		keep[idx] = true
 	}
 
-	// 统计需要移除的项
 	dupes := make(map[int]bool)
-	for _, idx := range toolOutputIdx {
+	for _, idx := range outputIdx {
 		if !keep[idx] {
 			dupes[idx] = true
 		}
 	}
 
 	if len(dupes) == 0 {
-		return body
+		return nil, false
 	}
 
-	// 重建 input 数组，跳过标记为重复的索引
-	filtered := make([]byte, 0, len(inputItems.Raw))
+	// 重建数组，跳过重复项
+	filtered := make([]byte, 0, len(arr.Raw))
 	filtered = append(filtered, '[')
 	first := true
-	for i, item := range arr {
+	for i, item := range items {
 		if dupes[i] {
 			continue
 		}
@@ -1109,9 +1128,5 @@ func dedupeToolOutputs(body []byte) []byte {
 	}
 	filtered = append(filtered, ']')
 
-	out, err := sjson.SetRawBytes(body, "input", filtered)
-	if err != nil {
-		return body
-	}
-	return out
+	return filtered, true
 }
