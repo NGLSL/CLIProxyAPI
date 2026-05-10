@@ -153,15 +153,14 @@ func TestConvertSystemRoleToDeveloper_NoInputField(t *testing.T) {
 	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
-	// Check that other fields are still set correctly
+	// Check that stream is still set correctly
 	stream := gjson.Get(outputStr, "stream")
 	if !stream.Bool() {
 		t.Error("Stream should be set to true by conversion")
 	}
 
-	store := gjson.Get(outputStr, "store")
-	if store.Bool() {
-		t.Error("Store should be set to false by conversion")
+	if gjson.Get(outputStr, "store").Exists() {
+		t.Error("Store should not be injected by conversion")
 	}
 }
 
@@ -200,22 +199,14 @@ func TestConvertOpenAIResponsesRequestToCodex_OriginalIssue(t *testing.T) {
 		t.Error("Stream should be set to true")
 	}
 
-	// Verify other required fields for Codex
-	store := gjson.Get(outputStr, "store")
-	if store.Bool() {
-		t.Error("Store should be false")
+	if gjson.Get(outputStr, "store").Exists() {
+		t.Error("Store should not be injected by conversion")
 	}
-
-	parallelCalls := gjson.Get(outputStr, "parallel_tool_calls")
-	if !parallelCalls.Bool() {
-		t.Error("parallel_tool_calls should be true")
+	if gjson.Get(outputStr, "parallel_tool_calls").Exists() {
+		t.Error("parallel_tool_calls should not be injected by conversion")
 	}
-
-	include := gjson.Get(outputStr, "include")
-	if !include.IsArray() || len(include.Array()) != 1 {
-		t.Error("include should be an array with one element")
-	} else if include.Array()[0].String() != "reasoning.encrypted_content" {
-		t.Errorf("Expected include[0] to be 'reasoning.encrypted_content', got '%s'", include.Array()[0].String())
+	if gjson.Get(outputStr, "include").Exists() {
+		t.Error("include should not be injected without reasoning")
 	}
 }
 
@@ -308,6 +299,107 @@ func TestConvertOpenAIResponsesRequestToCodex_NormalizesTopLevelToolChoicePrevie
 	if got := gjson.GetBytes(output, "tool_choice.type").String(); got != "web_search" {
 		t.Fatalf("tool_choice.type = %q, want %q: %s", got, "web_search", string(output))
 	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_PreservesTokenAndSamplingFields(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"max_output_tokens": 128,
+		"max_completion_tokens": 64,
+		"temperature": 0.7,
+		"top_p": 0.8,
+		"input": [{"role":"user","content":"hello"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+	if got := gjson.GetBytes(output, "max_output_tokens").Int(); got != 128 {
+		t.Fatalf("max_output_tokens = %d, want %d: %s", got, 128, string(output))
+	}
+	if got := gjson.GetBytes(output, "max_completion_tokens").Int(); got != 64 {
+		t.Fatalf("max_completion_tokens = %d, want %d: %s", got, 64, string(output))
+	}
+	if got := gjson.GetBytes(output, "temperature").Float(); got != 0.7 {
+		t.Fatalf("temperature = %f, want %f: %s", got, 0.7, string(output))
+	}
+	if got := gjson.GetBytes(output, "top_p").Float(); got != 0.8 {
+		t.Fatalf("top_p = %f, want %f: %s", got, 0.8, string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_IncludeDependsOnReasoning(t *testing.T) {
+	t.Run("without reasoning", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gpt-5.2",
+			"include": ["reasoning.encrypted_content"],
+			"input": [{"role":"user","content":"hello"}]
+		}`)
+
+		output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+		if gjson.GetBytes(output, "include").Exists() {
+			t.Fatalf("include should be removed when reasoning is absent: %s", string(output))
+		}
+	})
+
+	t.Run("with reasoning", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gpt-5.2",
+			"reasoning": {"effort": "medium"},
+			"input": [{"role":"user","content":"hello"}]
+		}`)
+
+		output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+		include := gjson.GetBytes(output, "include")
+		if !include.IsArray() || len(include.Array()) != 1 || include.Array()[0].String() != "reasoning.encrypted_content" {
+			t.Fatalf("include = %s, want [reasoning.encrypted_content]", include.Raw)
+		}
+	})
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_ServiceTierNormalization(t *testing.T) {
+	t.Run("priority", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gpt-5.2",
+			"service_tier": "priority",
+			"input": [{"role":"user","content":"hello"}]
+		}`)
+
+		output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+		if got := gjson.GetBytes(output, "service_tier").String(); got != "priority" {
+			t.Fatalf("service_tier = %q, want %q: %s", got, "priority", string(output))
+		}
+	})
+
+	t.Run("flex", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gpt-5.2",
+			"service_tier": "flex",
+			"input": [{"role":"user","content":"hello"}]
+		}`)
+
+		output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+		if got := gjson.GetBytes(output, "service_tier").String(); got != "flex" {
+			t.Fatalf("service_tier = %q, want %q: %s", got, "flex", string(output))
+		}
+	})
+
+	t.Run("unsupported", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gpt-5.2",
+			"service_tier": "auto",
+			"input": [{"role":"user","content":"hello"}]
+		}`)
+
+		output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+		if gjson.GetBytes(output, "service_tier").Exists() {
+			t.Fatalf("service_tier should be removed for unsupported values: %s", string(output))
+		}
+	})
 }
 
 func TestUserFieldDeletion(t *testing.T) {

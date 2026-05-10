@@ -18,19 +18,8 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	}
 
 	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
-	// Codex Responses rejects token limit fields, so strip them out before forwarding.
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
-	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() {
-		if v.String() != "priority" {
-			rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
-		}
-	}
+	rawJSON = normalizeCodexResponsesInclude(rawJSON)
+	rawJSON = normalizeCodexResponsesServiceTier(rawJSON)
 
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
@@ -43,6 +32,40 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 
 	return rawJSON
+}
+
+func normalizeCodexResponsesInclude(rawJSON []byte) []byte {
+	if !gjson.GetBytes(rawJSON, "reasoning").Exists() {
+		updated, err := sjson.DeleteBytes(rawJSON, "include")
+		if err != nil {
+			return rawJSON
+		}
+		return updated
+	}
+
+	updated, err := sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
+	if err != nil {
+		return rawJSON
+	}
+	return updated
+}
+
+func normalizeCodexResponsesServiceTier(rawJSON []byte) []byte {
+	serviceTier := gjson.GetBytes(rawJSON, "service_tier")
+	if !serviceTier.Exists() {
+		return rawJSON
+	}
+
+	switch serviceTier.String() {
+	case "priority", "flex":
+		return rawJSON
+	default:
+		updated, err := sjson.DeleteBytes(rawJSON, "service_tier")
+		if err != nil {
+			return rawJSON
+		}
+		return updated
+	}
 }
 
 // applyResponsesCompactionCompatibility handles OpenAI Responses context_management.compaction
