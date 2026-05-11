@@ -60,7 +60,7 @@ func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {
 		t.Errorf("unexpected first event.\nGot: %q\nWant: %q", parts[0], expectedPart1)
 	}
 
-	expectedPart2 := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}"
+	expectedPart2 := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[{\"type\":\"function_call\",\"arguments\":\"{}\"}]}}"
 	if parts[1] != expectedPart2 {
 		t.Errorf("unexpected second event.\nGot: %q\nWant: %q", parts[1], expectedPart2)
 	}

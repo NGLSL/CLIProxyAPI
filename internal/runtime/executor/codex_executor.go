@@ -186,7 +186,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	// 防御性去重：翻译链中可能因多 Key / 多层处理导致 input 数组里
 	// 同一个 call_id 的 function_call_output 或 tool_search_output 被重复写入。
 	// 在所有请求体变换完成后做一次最终去重，避免模型收到重复工具结果。
-	body = dedupeToolOutputs(body)
+	body = cliproxyexecutor.DedupeToolOutputs(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -432,7 +432,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = ensureImageGenerationTool(body, baseModel, auth)
 
 	// 防御性去重：同 Execute 方法，防止 input 中工具输出重复。
-	body = dedupeToolOutputs(body)
+	body = cliproxyexecutor.DedupeToolOutputs(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -1047,86 +1047,4 @@ func codexConfigLookupAttrs(auth *cliproxyauth.Auth) (apiKey, baseURL string) {
 		return "", ""
 	}
 	return strings.TrimSpace(auth.Attributes["api_key"]), strings.TrimSpace(auth.Attributes["base_url"])
-}
-
-// dedupeToolOutputs 移除工具结果数组中 call_id / tool_call_id 重复的项（保留最后一次出现）。
-// 同时兼容两种上游格式：
-//   - Responses 格式：input[].{type, call_id}  （type 为 function_call_output / tool_search_output）
-//   - Chat 格式：     messages[].{role, tool_call_id}（role 为 tool）
-func dedupeToolOutputs(body []byte) []byte {
-	// ---- Responses 格式 ----
-	if inputItems := gjson.GetBytes(body, "input"); inputItems.IsArray() {
-		if deduped, changed := dedupeInputArray(inputItems, "type", "call_id", "function_call_output", "tool_search_output"); changed {
-			body, _ = sjson.SetRawBytes(body, "input", deduped)
-		}
-	}
-
-	// ---- Chat Completions 格式 ----
-	if messages := gjson.GetBytes(body, "messages"); messages.IsArray() {
-		if deduped, changed := dedupeInputArray(messages, "role", "tool_call_id", "tool"); changed {
-			body, _ = sjson.SetRawBytes(body, "messages", deduped)
-		}
-	}
-
-	return body
-}
-
-// dedupeInputArray 对数组中匹配指定 keyField 和 matchTypes 的项按 idField 去重，
-// 保留最后一次出现。返回重建后的 JSON 数组字节和是否有变更。
-func dedupeInputArray(arr gjson.Result, typeField, idField string, matchTypes ...string) ([]byte, bool) {
-	items := arr.Array()
-	lastIdxByID := make(map[string]int, len(items))
-	outputIdx := make([]int, 0, len(items))
-
-	matchSet := make(map[string]struct{}, len(matchTypes))
-	for _, t := range matchTypes {
-		matchSet[t] = struct{}{}
-	}
-
-	for i, item := range items {
-		typ := item.Get(typeField).String()
-		if _, ok := matchSet[typ]; !ok {
-			continue
-		}
-		id := strings.TrimSpace(item.Get(idField).String())
-		if id == "" {
-			continue
-		}
-		outputIdx = append(outputIdx, i)
-		lastIdxByID[id] = i // 最后出现覆盖前面的
-	}
-
-	keep := make(map[int]bool, len(lastIdxByID))
-	for _, idx := range lastIdxByID {
-		keep[idx] = true
-	}
-
-	dupes := make(map[int]bool)
-	for _, idx := range outputIdx {
-		if !keep[idx] {
-			dupes[idx] = true
-		}
-	}
-
-	if len(dupes) == 0 {
-		return nil, false
-	}
-
-	// 重建数组，跳过重复项
-	filtered := make([]byte, 0, len(arr.Raw))
-	filtered = append(filtered, '[')
-	first := true
-	for i, item := range items {
-		if dupes[i] {
-			continue
-		}
-		if !first {
-			filtered = append(filtered, ',')
-		}
-		filtered = append(filtered, []byte(item.Raw)...)
-		first = false
-	}
-	filtered = append(filtered, ']')
-
-	return filtered, true
 }

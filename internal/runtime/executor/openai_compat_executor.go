@@ -334,7 +334,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	// 防御性去重：多 Key / 重试时翻译链可能重复写入 tool output。
-	translated = dedupeToolOutputs(translated)
+	translated = cliproxyexecutor.DedupeToolOutputs(translated)
 
 	upstreamURL := strings.TrimSuffix(baseURL, "/") + endpoint
 	parsedURL, err := url.Parse(upstreamURL)
@@ -447,7 +447,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 
 	// 防御性去重：多 Key / 重试时翻译链可能重复写入 tool output。
-	translated = dedupeToolOutputs(translated)
+	translated = cliproxyexecutor.DedupeToolOutputs(translated)
 
 	upstreamURL := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	parsedURL, err := url.Parse(upstreamURL)

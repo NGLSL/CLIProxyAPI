@@ -1240,6 +1240,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	req, opts = cliproxyexecutor.DedupeRequestToolOutputs(req, opts)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1271,6 +1272,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	req, opts = cliproxyexecutor.DedupeRequestToolOutputs(req, opts)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1302,6 +1304,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	req, opts = cliproxyexecutor.DedupeRequestToolOutputs(req, opts)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
