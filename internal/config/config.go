@@ -421,6 +421,10 @@ type CodexKey struct {
 	// continue to load without migration.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Name is an optional display name for distinguishing Codex config blocks.
+	// 它只用于配置管理和展示，不参与上游鉴权、模型路由或 Auth ID 生成。
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -1016,6 +1020,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 	for i := range cfg.CodexKey {
 		e := cfg.CodexKey[i]
 		e.APIKey = strings.TrimSpace(e.APIKey)
+		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.ProxyURL = strings.TrimSpace(e.ProxyURL)

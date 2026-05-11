@@ -960,6 +960,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
 		APIKey         *string                    `json:"api-key"`
 		APIKeyEntries  *[]config.CodexAPIKeyEntry `json:"api-key-entries"`
+		Name           *string                    `json:"name"`
 		Prefix         *string                    `json:"prefix"`
 		BaseURL        *string                    `json:"base-url"`
 		ProxyURL       *string                    `json:"proxy-url"`
@@ -1004,6 +1005,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.APIKeyEntries != nil {
 		entry.APIKeyEntries = append([]config.CodexAPIKeyEntry(nil), (*body.Value.APIKeyEntries)...)
 	}
+	if body.Value.Name != nil {
+		entry.Name = strings.TrimSpace(*body.Value.Name)
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
@@ -1038,17 +1042,38 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 func (h *Handler) DeleteCodexKey(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.CodexKey) {
+			h.cfg.CodexKey = append(h.cfg.CodexKey[:idx], h.cfg.CodexKey[idx+1:]...)
+			h.cfg.SanitizeCodexKeys()
+			h.persistLocked(c)
+			return
+		}
+		c.JSON(400, gin.H{"error": "invalid index"})
+		return
+	}
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
-			out := make([]config.CodexKey, 0, len(h.cfg.CodexKey))
-			for _, v := range h.cfg.CodexKey {
-				if codexKeyContainsAPIKey(v, val) && strings.TrimSpace(v.BaseURL) == base {
-					continue
+			matchIndex := -1
+			matchCount := 0
+			for i := range h.cfg.CodexKey {
+				if codexKeyContainsAPIKey(h.cfg.CodexKey[i], val) && strings.TrimSpace(h.cfg.CodexKey[i].BaseURL) == base {
+					matchCount++
+					if matchIndex == -1 {
+						matchIndex = i
+					}
 				}
-				out = append(out, v)
 			}
-			h.cfg.CodexKey = out
+			if matchCount > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match api-key and base-url; index is required"})
+				return
+			}
+			if matchIndex != -1 {
+				h.cfg.CodexKey = append(h.cfg.CodexKey[:matchIndex], h.cfg.CodexKey[matchIndex+1:]...)
+			}
 			h.cfg.SanitizeCodexKeys()
 			h.persistLocked(c)
 			return
@@ -1074,16 +1099,6 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 		h.cfg.SanitizeCodexKeys()
 		h.persistLocked(c)
 		return
-	}
-	if idxStr := c.Query("index"); idxStr != "" {
-		var idx int
-		_, err := fmt.Sscanf(idxStr, "%d", &idx)
-		if err == nil && idx >= 0 && idx < len(h.cfg.CodexKey) {
-			h.cfg.CodexKey = append(h.cfg.CodexKey[:idx], h.cfg.CodexKey[idx+1:]...)
-			h.cfg.SanitizeCodexKeys()
-			h.persistLocked(c)
-			return
-		}
 	}
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
@@ -1164,6 +1179,7 @@ func normalizeCodexKey(entry *config.CodexKey) {
 		return
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.Name = strings.TrimSpace(entry.Name)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)

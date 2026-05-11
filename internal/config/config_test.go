@@ -130,6 +130,32 @@ func TestLoadConfigOptionalRoutingSourcePreference(t *testing.T) {
 	}
 }
 
+func TestLoadConfigOptionalCodexKeyName(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := `codex-api-key:
+  - name: " Primary Codex "
+    base-url: "https://codex.example.com"
+    api-key-entries:
+      - api-key: "codex-key"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfigOptional(configPath, false)
+	if err != nil {
+		t.Fatalf("LoadConfigOptional() error = %v", err)
+	}
+	if got := len(cfg.CodexKey); got != 1 {
+		t.Fatalf("CodexKey len = %d, want 1", got)
+	}
+	if got := cfg.CodexKey[0].Name; got != "Primary Codex" {
+		t.Fatalf("CodexKey[0].Name = %q, want %q", got, "Primary Codex")
+	}
+}
+
 func TestIsKnownDefaultValueRecognizesQuotaCacheRefreshInterval(t *testing.T) {
 	t.Parallel()
 

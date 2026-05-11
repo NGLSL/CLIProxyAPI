@@ -382,3 +382,82 @@ func TestDeleteCodexKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 		t.Fatalf("codex keys len = %d, want 2", got)
 	}
 }
+
+func TestDeleteCodexKey_RequiresIndexWhenAPIKeyAndBaseURLDuplicated(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			CodexKey: []config.CodexKey{
+				{
+					BaseURL: "https://codex.example.com",
+					APIKeyEntries: []config.CodexAPIKeyEntry{
+						{APIKey: "shared-key", ProxyURL: "http://proxy-a.example.com:8080"},
+					},
+				},
+				{
+					BaseURL: "https://codex.example.com",
+					APIKeyEntries: []config.CodexAPIKeyEntry{
+						{APIKey: "shared-key", ProxyURL: "http://proxy-b.example.com:8080"},
+					},
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/codex-api-key?api-key=shared-key&base-url=https://codex.example.com", nil)
+
+	h.DeleteCodexKey(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if got := len(h.cfg.CodexKey); got != 2 {
+		t.Fatalf("codex keys len = %d, want 2", got)
+	}
+}
+
+func TestDeleteCodexKey_DeletesDuplicateByIndex(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			CodexKey: []config.CodexKey{
+				{
+					BaseURL: "https://codex.example.com",
+					APIKeyEntries: []config.CodexAPIKeyEntry{
+						{APIKey: "shared-key", ProxyURL: "http://proxy-a.example.com:8080"},
+					},
+				},
+				{
+					BaseURL: "https://codex.example.com",
+					APIKeyEntries: []config.CodexAPIKeyEntry{
+						{APIKey: "shared-key", ProxyURL: "http://proxy-b.example.com:8080"},
+					},
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/codex-api-key?index=1", nil)
+
+	h.DeleteCodexKey(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := len(h.cfg.CodexKey); got != 1 {
+		t.Fatalf("codex keys len = %d, want 1", got)
+	}
+	if got := h.cfg.CodexKey[0].APIKeyEntries[0].ProxyURL; got != "http://proxy-a.example.com:8080" {
+		t.Fatalf("remaining proxy-url = %q, want %q", got, "http://proxy-a.example.com:8080")
+	}
+}
