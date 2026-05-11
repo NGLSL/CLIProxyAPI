@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -88,6 +89,97 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+}
+
+func TestCodexWebsocketSessionRedialsWhenAuthChanges(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	authHeaders := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		for {
+			msgType, _, errRead := conn.ReadMessage()
+			if errRead != nil {
+				return
+			}
+			if msgType != websocket.TextMessage {
+				continue
+			}
+			authHeaders <- r.Header.Get("Authorization")
+			completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	sessionID := "session-redial-auth"
+	defer exec.CloseExecutionSession(sessionID)
+
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: sessionID,
+		},
+	}
+	auths := []struct {
+		auth *cliproxyauth.Auth
+		want string
+	}{
+		{
+			auth: &cliproxyauth.Auth{ID: "auth-a", Attributes: map[string]string{"api_key": "sk-a", "base_url": server.URL}},
+			want: "Bearer sk-a",
+		},
+		{
+			auth: &cliproxyauth.Auth{ID: "auth-b", Attributes: map[string]string{"api_key": "sk-b", "base_url": server.URL}},
+			want: "Bearer sk-b",
+		},
+	}
+
+	for i := range auths {
+		streamResult, err := exec.ExecuteStream(context.Background(), auths[i].auth, req, opts)
+		if err != nil {
+			t.Fatalf("ExecuteStream(%s) error = %v", auths[i].auth.ID, err)
+		}
+		for chunk := range streamResult.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("stream chunk error for %s: %v", auths[i].auth.ID, chunk.Err)
+			}
+		}
+
+		select {
+		case got := <-authHeaders:
+			if got != auths[i].want {
+				t.Fatalf("request %d Authorization = %q, want %q", i+1, got, auths[i].want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for upstream auth header %d", i+1)
+		}
+	}
+}
+
+func TestShouldNotifyCodexUpstreamDisconnectSkipsRecoverableStatus(t *testing.T) {
+	err, ok := parseCodexWebsocketError([]byte(`{"type":"error","status":429,"error":{"message":"quota exhausted"}}`))
+	if !ok {
+		t.Fatalf("expected websocket status error")
+	}
+	if shouldNotifyCodexUpstreamDisconnect(err) {
+		t.Fatalf("recoverable websocket status should not force downstream disconnect")
+	}
+	if !shouldNotifyCodexUpstreamDisconnect(errors.New("network reset")) {
+		t.Fatalf("network disconnect should still close downstream")
 	}
 }
 

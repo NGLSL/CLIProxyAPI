@@ -1284,7 +1284,27 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.connMu.Lock()
 	conn := sess.conn
 	readerConn := sess.readerConn
-	sess.connMu.Unlock()
+	sessionAuthID := strings.TrimSpace(sess.authID)
+	sessionWSURL := strings.TrimSpace(sess.wsURL)
+	sessionID := sess.sessionID
+	if conn != nil && (sessionAuthID != strings.TrimSpace(authID) || sessionWSURL != strings.TrimSpace(wsURL)) {
+		oldConn := conn
+		oldAuthID := sess.authID
+		oldWSURL := sess.wsURL
+		sess.conn = nil
+		if sess.readerConn == oldConn {
+			sess.readerConn = nil
+		}
+		conn = nil
+		readerConn = nil
+		sess.connMu.Unlock()
+		logCodexWebsocketDisconnected(sessionID, oldAuthID, oldWSURL, "auth_or_endpoint_changed", nil)
+		if errClose := oldConn.Close(); errClose != nil {
+			log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+		}
+	} else {
+		sess.connMu.Unlock()
+	}
 	if conn != nil {
 		if readerConn != conn {
 			sess.connMu.Lock()
@@ -1404,9 +1424,27 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSes
 	sess.connMu.Unlock()
 
 	logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason, err)
-	sess.notifyUpstreamDisconnect(err)
+	if shouldNotifyCodexUpstreamDisconnect(err) {
+		sess.notifyUpstreamDisconnect(err)
+	}
 	if errClose := conn.Close(); errClose != nil {
 		log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+	}
+}
+
+func shouldNotifyCodexUpstreamDisconnect(err error) bool {
+	if err == nil {
+		return true
+	}
+	statusProvider, ok := err.(interface{ StatusCode() int })
+	if !ok || statusProvider == nil {
+		return true
+	}
+	switch statusProvider.StatusCode() {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return false
+	default:
+		return true
 	}
 }
 

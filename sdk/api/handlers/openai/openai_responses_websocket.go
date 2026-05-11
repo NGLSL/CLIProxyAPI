@@ -210,6 +210,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
+		requestJSON = dedupeResponsesWebsocketRequestToolItems(requestJSON)
 		updatedLastRequest = bytes.Clone(requestJSON)
 		previousLastRequest := bytes.Clone(lastRequest)
 		previousLastResponseOutput := bytes.Clone(lastResponseOutput)
@@ -296,22 +297,50 @@ func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []by
 	}
 	rawJSON = normalizedJSON
 	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
+	var normalized []byte
+	var updatedLastRequest []byte
 	switch requestType {
 	case wsRequestTypeCreate:
 		// log.Infof("responses websocket: response.create request")
 		if len(lastRequest) == 0 {
-			return normalizeResponseCreateRequest(rawJSON)
+			normalized, updatedLastRequest, errMsg = normalizeResponseCreateRequest(rawJSON)
+		} else {
+			normalized, updatedLastRequest, errMsg = normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
 		}
-		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
 	case wsRequestTypeAppend:
 		// log.Infof("responses websocket: response.append request")
-		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
+		normalized, updatedLastRequest, errMsg = normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
 	default:
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
 			Error:      fmt.Errorf("unsupported websocket request type: %s", requestType),
 		}
 	}
+	if errMsg != nil {
+		return nil, updatedLastRequest, errMsg
+	}
+	normalized = dedupeResponsesWebsocketRequestToolItems(normalized)
+	return normalized, bytes.Clone(normalized), nil
+}
+
+func dedupeResponsesWebsocketRequestToolItems(rawJSON []byte) []byte {
+	if len(rawJSON) == 0 {
+		return rawJSON
+	}
+	deduped := cliproxyexecutor.DedupeToolOutputs(rawJSON)
+	input := gjson.GetBytes(deduped, "input")
+	if !input.Exists() || !input.IsArray() {
+		return deduped
+	}
+	dedupedInput, errDedupe := dedupeFunctionCallsByCallID(input.Raw)
+	if errDedupe != nil || dedupedInput == input.Raw {
+		return deduped
+	}
+	updated, errSet := sjson.SetRawBytes(deduped, "input", []byte(dedupedInput))
+	if errSet != nil {
+		return deduped
+	}
+	return updated
 }
 
 func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces.ErrorMessage) {

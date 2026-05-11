@@ -1421,6 +1421,51 @@ func TestNormalizeResponsesWebsocketRequestDropsDuplicateFunctionCallsByCallID(t
 	}
 }
 
+func TestNormalizeResponsesWebsocketRequestDropsDuplicateToolOutputsByCallID(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"},{"type":"function_call_output","id":"tool-out-old","call_id":"call-1","output":"old"}]}`)
+	lastResponseOutput := []byte(`[]`)
+	raw := []byte(`{"type":"response.create","input":[{"type":"function_call_output","id":"tool-out-new","call_id":"call-1","output":"new"},{"type":"message","id":"msg-2"}]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+
+	items := gjson.GetBytes(normalized, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("merged input len = %d, want 3: %s", len(items), normalized)
+	}
+	if items[0].Get("id").String() != "fc-1" ||
+		items[1].Get("id").String() != "tool-out-new" ||
+		items[2].Get("id").String() != "msg-2" {
+		t.Fatalf("unexpected deduped input order: %s", normalized)
+	}
+	if got := items[1].Get("output").String(); got != "new" {
+		t.Fatalf("tool output = %q, want new", got)
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDDedupesIncrementalToolItems(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
+	raw := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"},{"type":"function_call","id":"fc-dup","call_id":"call-1","name":"tool"},{"type":"function_call_output","id":"tool-out-old","call_id":"call-1","output":"old"},{"type":"function_call_output","id":"tool-out-new","call_id":"call-1","output":"new"}]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, []byte(`[]`), true, true)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := gjson.GetBytes(normalized, "previous_response_id").String(); got != "resp-1" {
+		t.Fatalf("previous_response_id = %s, want resp-1", got)
+	}
+
+	items := gjson.GetBytes(normalized, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("incremental input len = %d, want 2: %s", len(items), normalized)
+	}
+	if items[0].Get("id").String() != "fc-1" || items[1].Get("id").String() != "tool-out-new" {
+		t.Fatalf("unexpected deduped incremental input: %s", normalized)
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestTreatsCustomToolTranscriptReplacementAsReset(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"},{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"apply_patch"},{"type":"custom_tool_call_output","id":"tool-out-1","call_id":"call-1"},{"type":"message","id":"assistant-1","role":"assistant"}]}`)
 	lastResponseOutput := []byte(`[
