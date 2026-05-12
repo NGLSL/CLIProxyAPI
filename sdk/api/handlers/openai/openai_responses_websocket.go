@@ -323,26 +323,6 @@ func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []by
 	return normalized, bytes.Clone(normalized), nil
 }
 
-func dedupeResponsesWebsocketRequestToolItems(rawJSON []byte) []byte {
-	if len(rawJSON) == 0 {
-		return rawJSON
-	}
-	deduped := cliproxyexecutor.DedupeToolOutputs(rawJSON)
-	input := gjson.GetBytes(deduped, "input")
-	if !input.Exists() || !input.IsArray() {
-		return deduped
-	}
-	dedupedInput, errDedupe := dedupeFunctionCallsByCallID(input.Raw)
-	if errDedupe != nil || dedupedInput == input.Raw {
-		return deduped
-	}
-	updated, errSet := sjson.SetRawBytes(deduped, "input", []byte(dedupedInput))
-	if errSet != nil {
-		return deduped
-	}
-	return updated
-}
-
 func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
@@ -524,6 +504,111 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
 	return bytes.Clone(normalized)
+}
+
+func dedupeResponsesWebsocketRequestToolItems(rawJSON []byte) []byte {
+	if len(rawJSON) == 0 {
+		return rawJSON
+	}
+
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.Exists() || !input.IsArray() {
+		return rawJSON
+	}
+
+	dedupedInput, changedOutputs, errDedupeOutputs := dedupeResponsesWebsocketToolOutputsByCallID(input.Raw)
+	if errDedupeOutputs == nil && changedOutputs {
+		updated, errSet := sjson.SetRawBytes(rawJSON, "input", []byte(dedupedInput))
+		if errSet == nil {
+			rawJSON = updated
+		}
+	}
+
+	input = gjson.GetBytes(rawJSON, "input")
+	if !input.Exists() || !input.IsArray() {
+		return rawJSON
+	}
+
+	dedupedInput, errDedupeFunctionCalls := dedupeFunctionCallsByCallID(input.Raw)
+	if errDedupeFunctionCalls != nil || dedupedInput == input.Raw {
+		return rawJSON
+	}
+
+	updated, errSet := sjson.SetRawBytes(rawJSON, "input", []byte(dedupedInput))
+	if errSet != nil {
+		return rawJSON
+	}
+	return updated
+}
+
+func dedupeResponsesWebsocketToolOutputsByCallID(rawArray string) (string, bool, error) {
+	rawArray = strings.TrimSpace(rawArray)
+	if rawArray == "" {
+		return "[]", false, nil
+	}
+	var items []json.RawMessage
+	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
+		return "", false, errUnmarshal
+	}
+
+	lastIdxByCallID := make(map[string]int, len(items))
+	toolOutputIdx := make([]int, 0, len(items))
+	for i, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if !isResponsesWebsocketToolOutputType(itemType) {
+			continue
+		}
+		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+		if callID == "" {
+			continue
+		}
+		toolOutputIdx = append(toolOutputIdx, i)
+		lastIdxByCallID[callID] = i
+	}
+	if len(lastIdxByCallID) == len(toolOutputIdx) {
+		return rawArray, false, nil
+	}
+
+	keep := make(map[int]struct{}, len(lastIdxByCallID))
+	for _, idx := range lastIdxByCallID {
+		keep[idx] = struct{}{}
+	}
+
+	filtered := make([]json.RawMessage, 0, len(items))
+	for i, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if isResponsesWebsocketToolOutputType(itemType) {
+			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			if callID != "" {
+				if _, ok := keep[i]; !ok {
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, item)
+	}
+
+	out, errMarshal := json.Marshal(filtered)
+	if errMarshal != nil {
+		return "", false, errMarshal
+	}
+	return string(out), true, nil
+}
+
+func isResponsesWebsocketToolOutputType(itemType string) bool {
+	itemType = strings.TrimSpace(itemType)
+	switch itemType {
+	case "function_call_output", "tool_search_output", "web_search_call_output", "computer_call_output", "custom_tool_call_output", "local_shell_call_output":
+		return true
+	default:
+		return strings.HasSuffix(itemType, "_call_output")
+	}
 }
 
 func dedupeFunctionCallsByCallID(rawArray string) (string, error) {

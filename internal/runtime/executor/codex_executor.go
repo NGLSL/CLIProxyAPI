@@ -183,11 +183,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = normalizeCodexInstructions(body)
 	body = ensureImageGenerationTool(body, baseModel, auth)
 
-	// 防御性去重：翻译链中可能因多 Key / 多层处理导致 input 数组里
-	// 同一个 call_id 的 function_call_output 或 tool_search_output 被重复写入。
-	// 在所有请求体变换完成后做一次最终去重，避免模型收到重复工具结果。
-	body = cliproxyexecutor.DedupeToolOutputs(body)
-
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
@@ -430,9 +425,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
 	body = ensureImageGenerationTool(body, baseModel, auth)
-
-	// 防御性去重：同 Execute 方法，防止 input 中工具输出重复。
-	body = cliproxyexecutor.DedupeToolOutputs(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
