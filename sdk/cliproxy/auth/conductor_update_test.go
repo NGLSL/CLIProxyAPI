@@ -46,6 +46,83 @@ func (e ineffectiveRefreshExecutor) HttpRequest(context.Context, *Auth, *http.Re
 	return nil, nil
 }
 
+type metadataMutatingExecutor struct {
+	provider string
+}
+
+func (e metadataMutatingExecutor) Identifier() string { return e.provider }
+
+func (e metadataMutatingExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["refresh_token"] = "new-refresh-token"
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e metadataMutatingExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e metadataMutatingExecutor) Refresh(context.Context, *Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func (e metadataMutatingExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e metadataMutatingExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+type captureAuthStore struct {
+	saved []*Auth
+}
+
+func (s *captureAuthStore) List(context.Context) ([]*Auth, error) { return nil, nil }
+
+func (s *captureAuthStore) Save(_ context.Context, auth *Auth) (string, error) {
+	if auth != nil {
+		s.saved = append(s.saved, auth.Clone())
+	}
+	return "", nil
+}
+
+func (s *captureAuthStore) Delete(context.Context, string) error { return nil }
+
+func TestManager_Execute_PersistsExecutorMetadataChanges(t *testing.T) {
+	ctx := context.Background()
+	store := &captureAuthStore{}
+	m := NewManager(store, nil, nil)
+	m.scheduler = nil
+	m.RegisterExecutor(metadataMutatingExecutor{provider: "claude"})
+
+	if _, errRegister := m.Register(ctx, &Auth{
+		ID:       "auth-metadata-refresh",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"email":         "x@example.com",
+			"refresh_token": "old-refresh-token",
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	store.saved = nil
+
+	_, errExecute := m.Execute(ctx, []string{"claude"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute: %v", errExecute)
+	}
+	if len(store.saved) == 0 {
+		t.Fatal("expected persisted auth after metadata change")
+	}
+	lastSaved := store.saved[len(store.saved)-1]
+	if got := lastSaved.Metadata["refresh_token"]; got != "new-refresh-token" {
+		t.Fatalf("persisted refresh_token = %v, want new-refresh-token", got)
+	}
+}
+
 func TestManager_Update_PreservesModelStates(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 

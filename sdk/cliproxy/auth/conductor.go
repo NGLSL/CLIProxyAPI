@@ -1374,7 +1374,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			metadataBefore, metadataBeforeOK := authMetadataFingerprint(auth.Metadata)
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			m.persistAuthMetadataChanges(execCtx, auth, metadataBefore, metadataBeforeOK)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -1454,7 +1456,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			metadataBefore, metadataBeforeOK := authMetadataFingerprint(auth.Metadata)
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+			m.persistAuthMetadataChanges(execCtx, auth, metadataBefore, metadataBeforeOK)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -1528,7 +1532,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		metadataBefore, metadataBeforeOK := authMetadataFingerprint(auth.Metadata)
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, models, pooled)
+		m.persistAuthMetadataChanges(execCtx, auth, metadataBefore, metadataBeforeOK)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -3115,6 +3121,33 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	return err
 }
 
+func authMetadataFingerprint(metadata map[string]any) ([]byte, bool) {
+	if metadata == nil {
+		return nil, true
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+func (m *Manager) persistAuthMetadataChanges(ctx context.Context, auth *Auth, before []byte, beforeOK bool) {
+	if m == nil || auth == nil || auth.ID == "" || !beforeOK {
+		return
+	}
+	after, afterOK := authMetadataFingerprint(auth.Metadata)
+	if !afterOK || bytes.Equal(before, after) {
+		return
+	}
+	now := time.Now()
+	auth.LastRefreshedAt = now
+	auth.UpdatedAt = now
+	if _, errUpdate := m.Update(ctx, auth); errUpdate != nil {
+		log.WithError(errUpdate).Debug("persist auth metadata changes failed")
+	}
+}
+
 // StartAutoRefresh launches a background loop that evaluates auth freshness
 // every few seconds and triggers refresh operations when required.
 // Only one loop is kept alive; starting a new one cancels the previous run.
@@ -3585,7 +3618,11 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 		return nil
 	}
 	if p, ok := exec.(RequestPreparer); ok && p != nil {
-		return p.PrepareRequest(req, a)
+		authCopy := a.Clone()
+		metadataBefore, metadataBeforeOK := authMetadataFingerprint(authCopy.Metadata)
+		errPrepare := p.PrepareRequest(req, authCopy)
+		m.persistAuthMetadataChanges(req.Context(), authCopy, metadataBefore, metadataBeforeOK)
+		return errPrepare
 	}
 	return nil
 }
@@ -3616,7 +3653,10 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if !ok || preparer == nil {
 		return &Error{Code: "not_supported", Message: "executor does not support http request preparation"}
 	}
-	return preparer.PrepareRequest(req, auth)
+	metadataBefore, metadataBeforeOK := authMetadataFingerprint(auth.Metadata)
+	errPrepare := preparer.PrepareRequest(req, auth)
+	m.persistAuthMetadataChanges(ctx, auth, metadataBefore, metadataBeforeOK)
+	return errPrepare
 }
 
 // NewHttpRequest constructs a new HTTP request and injects provider credentials into it.
@@ -3664,5 +3704,8 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if exec == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
-	return exec.HttpRequest(ctx, auth, req)
+	metadataBefore, metadataBeforeOK := authMetadataFingerprint(auth.Metadata)
+	resp, errRequest := exec.HttpRequest(ctx, auth, req)
+	m.persistAuthMetadataChanges(ctx, auth, metadataBefore, metadataBeforeOK)
+	return resp, errRequest
 }
