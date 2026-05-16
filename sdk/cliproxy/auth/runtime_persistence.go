@@ -277,6 +277,9 @@ func preserveRuntimeSnapshotState(auth *Auth, existing *Auth, now time.Time) {
 	if auth.Disabled || auth.Status == StatusDisabled || existing.Disabled || existing.Status == StatusDisabled {
 		return
 	}
+	if authRefreshTimestampAdvanced(auth, existing) {
+		return
+	}
 	candidate := auth.Clone()
 	sanitizeRuntimeSnapshotAuth(candidate, now)
 	if hasRuntimeSnapshotState(candidate) {
@@ -287,6 +290,13 @@ func preserveRuntimeSnapshotState(auth *Auth, existing *Auth, now time.Time) {
 		return
 	}
 	_ = applyRuntimeSnapshotState(auth, state, now)
+}
+
+func authRefreshTimestampAdvanced(auth *Auth, existing *Auth) bool {
+	if auth == nil || existing == nil || auth.LastRefreshedAt.IsZero() {
+		return false
+	}
+	return existing.LastRefreshedAt.IsZero() || auth.LastRefreshedAt.After(existing.LastRefreshedAt)
 }
 
 func sanitizeRuntimeSnapshotAuth(auth *Auth, now time.Time) {

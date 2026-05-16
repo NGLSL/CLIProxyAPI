@@ -46,6 +46,36 @@ func (e ineffectiveRefreshExecutor) HttpRequest(context.Context, *Auth, *http.Re
 	return nil, nil
 }
 
+type successfulRefreshExecutor struct {
+	provider string
+}
+
+func (e successfulRefreshExecutor) Identifier() string { return e.provider }
+
+func (e successfulRefreshExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e successfulRefreshExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e successfulRefreshExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = "new-access-token"
+	return auth, nil
+}
+
+func (e successfulRefreshExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e successfulRefreshExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
 type metadataMutatingExecutor struct {
 	provider string
 }
@@ -336,6 +366,49 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 	}
 	if state.Quota.BackoffLevel != backoffLevel {
 		t.Fatalf("expected BackoffLevel to be %d, got %d", backoffLevel, state.Quota.BackoffLevel)
+	}
+}
+
+func TestManager_RefreshAuth_ClearsInheritedRuntimeBlockAfterSuccessfulRefresh(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := successfulRefreshExecutor{provider: "claude"}
+	m.RegisterExecutor(executor)
+
+	now := time.Now().UTC()
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:       "auth-refresh-success",
+		Provider: "claude",
+		Status:   StatusError,
+		Metadata: map[string]any{
+			"access_token": "old-access-token",
+		},
+		ModelStates: map[string]*ModelState{
+			"claude-sonnet": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				LastError:      &Error{Message: "unauthorized", HTTPStatus: http.StatusUnauthorized},
+				UpdatedAt:      now,
+			},
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.refreshAuth(context.Background(), "auth-refresh-success")
+
+	updated, ok := m.GetByID("auth-refresh-success")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present after refresh")
+	}
+	if got := updated.Metadata["access_token"]; got != "new-access-token" {
+		t.Fatalf("access_token = %v, want new-access-token", got)
+	}
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() || len(updated.ModelStates) != 0 {
+		t.Fatalf("expected successful refresh to clear runtime block, got unavailable=%v next_retry=%s model_states=%d", updated.Unavailable, updated.NextRetryAfter, len(updated.ModelStates))
+	}
+	if updated.LastRefreshedAt.IsZero() {
+		t.Fatal("expected LastRefreshedAt to be set")
 	}
 }
 
