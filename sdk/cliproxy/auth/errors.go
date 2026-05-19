@@ -1,5 +1,28 @@
 package auth
 
+import (
+	"context"
+	"errors"
+	"strings"
+)
+
+const requestInterruptedByUserText = "request interrupted by user"
+
+// IsRequestInterruptedError reports whether err represents a user/request cancellation rather than provider health.
+func IsRequestInterruptedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if message == "" {
+		return false
+	}
+	return strings.Contains(message, requestInterruptedByUserText)
+}
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.

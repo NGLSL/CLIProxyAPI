@@ -760,6 +760,9 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		}
 
 		bootstrapEligible := func(err error) bool {
+			if coreauth.IsRequestInterruptedError(err) {
+				return false
+			}
 			status := statusFromError(err)
 			if status == 0 {
 				return true
