@@ -101,6 +101,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == gjson.String && systemTypePromptResult.String() == "text" {
 				systemPrompt := systemPromptResult.Get("text").String()
+				if util.IsClaudeCodeAttributionSystemText(systemPrompt) {
+					continue
+				}
 				partJSON := []byte(`{}`)
 				if systemPrompt != "" {
 					partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
@@ -109,7 +112,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				hasSystemInstruction = true
 			}
 		}
-	} else if systemResult.Type == gjson.String {
+	} else if systemResult.Type == gjson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
 		systemInstructionJSON = []byte(`{"role":"user","parts":[{"text":""}]}`)
 		systemInstructionJSON, _ = sjson.SetBytes(systemInstructionJSON, "parts.0.text", systemResult.String())
 		hasSystemInstruction = true

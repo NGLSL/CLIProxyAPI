@@ -72,7 +72,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 			httpClient.Transport = transport
 			return httpClient
 		}
-		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyURL)
+		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
 	}
 
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {

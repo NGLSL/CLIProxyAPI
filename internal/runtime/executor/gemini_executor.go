@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
@@ -134,6 +135,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = capGeminiMaxOutputTokens(body, baseModel)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -241,6 +243,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = capGeminiMaxOutputTokens(body, baseModel)
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "streamGenerateContent")
@@ -520,6 +523,26 @@ func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth) {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
+}
+
+func capGeminiMaxOutputTokens(body []byte, modelName string) []byte {
+	maxOut := gjson.GetBytes(body, "generationConfig.maxOutputTokens")
+	if !maxOut.Exists() || maxOut.Type != gjson.Number {
+		return body
+	}
+	modelInfo := registry.LookupModelInfo(modelName, "gemini")
+	if modelInfo == nil {
+		return body
+	}
+	limit := modelInfo.OutputTokenLimit
+	if limit <= 0 {
+		limit = modelInfo.MaxCompletionTokens
+	}
+	if limit <= 0 || maxOut.Int() <= int64(limit) {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "generationConfig.maxOutputTokens", limit)
+	return body
 }
 
 func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {
