@@ -63,6 +63,40 @@ func TestRequestStatisticsRecordIncludesFirstByteLatency(t *testing.T) {
 	}
 }
 
+func TestRequestStatisticsRecordIncludesReasoningAndCacheBreakdown(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:          "test-key",
+		Model:           "gpt-5.4",
+		ReasoningEffort: "high",
+		RequestedAt:     time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:         10,
+			OutputTokens:        20,
+			ReasoningTokens:     3,
+			CachedTokens:        4,
+			CacheReadTokens:     5,
+			CacheCreationTokens: 6,
+			TotalTokens:         30,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	details := snapshot.APIs["test-key"].Models["gpt-5.4"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if details[0].ReasoningEffort != "high" {
+		t.Fatalf("reasoning effort = %q, want %q", details[0].ReasoningEffort, "high")
+	}
+	if details[0].Tokens.CacheReadTokens != 5 {
+		t.Fatalf("cache read tokens = %d, want 5", details[0].Tokens.CacheReadTokens)
+	}
+	if details[0].Tokens.CacheCreationTokens != 6 {
+		t.Fatalf("cache creation tokens = %d, want 6", details[0].Tokens.CacheCreationTokens)
+	}
+}
+
 func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 	stats := NewRequestStatistics()
 	timestamp := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)

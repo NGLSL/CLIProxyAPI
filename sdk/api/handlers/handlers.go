@@ -234,6 +234,17 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	return meta
 }
 
+func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, rawJSON []byte) {
+	if meta == nil {
+		return
+	}
+	effort := thinking.ExtractReasoningEffort(rawJSON, handlerType, model)
+	if effort == "" {
+		return
+	}
+	meta[coreexecutor.ReasoningEffortMetadataKey] = effort
+}
+
 func requestForwardHeaders(ctx context.Context) http.Header {
 	if ctx == nil {
 		return nil
@@ -571,6 +582,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
+	setReasoningEffortMetadata(reqMeta, handlerType, modelName, rawJSON)
 	forwardHeaders, forwardQuery := requestForwardOptions(ctx)
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -621,6 +633,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
+	setReasoningEffortMetadata(reqMeta, handlerType, modelName, rawJSON)
 	forwardHeaders, forwardQuery := requestForwardOptions(ctx)
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -675,6 +688,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
+	setReasoningEffortMetadata(reqMeta, handlerType, modelName, rawJSON)
 	forwardHeaders, forwardQuery := requestForwardOptions(ctx)
 	payload := rawJSON
 	if len(payload) == 0 {

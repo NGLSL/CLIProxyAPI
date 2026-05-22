@@ -24,6 +24,7 @@ type UsageReporter struct {
 	authIndex   string
 	apiKey      string
 	source      string
+	reasoning   string
 	requestedAt time.Time
 	once        sync.Once
 }
@@ -41,6 +42,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		requestedAt: time.Now(),
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
+		reasoning:   usage.ReasoningEffortFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -131,6 +133,7 @@ func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, d
 		APIKey:           r.apiKey,
 		AuthID:           r.authID,
 		AuthIndex:        r.authIndex,
+		ReasoningEffort:  r.reasoning,
 		RequestedAt:      r.requestedAt,
 		Latency:          r.latency(),
 		FirstByteLatency: r.firstByteLatency(ctx),
@@ -261,7 +264,7 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	usageNode := gjson.ParseBytes(data).Get("response.usage")
-	if !usageNode.Exists() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
 	return parseOpenAIStyleUsageNode(usageNode), true
@@ -269,7 +272,7 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 
 func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
 	usageNode := gjson.ParseBytes(data).Get("response.tool_usage.image_gen")
-	if !usageNode.Exists() || !usageNode.IsObject() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
 	return parseOpenAIStyleUsageNode(usageNode), true
@@ -277,10 +280,25 @@ func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
 
 func ParseOpenAIUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data).Get("usage")
-	if !usageNode.Exists() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}
 	}
 	return parseOpenAIStyleUsageNode(usageNode)
+}
+
+func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
+	if !usageNode.Exists() || !usageNode.IsObject() {
+		return false
+	}
+	return usageNode.Get("prompt_tokens").Exists() ||
+		usageNode.Get("input_tokens").Exists() ||
+		usageNode.Get("completion_tokens").Exists() ||
+		usageNode.Get("output_tokens").Exists() ||
+		usageNode.Get("total_tokens").Exists() ||
+		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
+		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
 }
 
 func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
@@ -344,7 +362,7 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() || !usageNode.IsObject() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
 	return parseOpenAIStyleUsageNode(usageNode), true
@@ -371,10 +389,12 @@ func parseClaudeStyleUsageNode(usageNode gjson.Result) usage.Detail {
 
 	inputTokens += cacheReadTokens + cacheCreationTokens
 	detail := usage.Detail{
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		CachedTokens: cachedTokens,
-		TotalTokens:  inputTokens + outputTokens,
+		InputTokens:         inputTokens,
+		OutputTokens:        outputTokens,
+		CachedTokens:        cachedTokens,
+		CacheReadTokens:     cacheReadTokens,
+		CacheCreationTokens: cacheCreationTokens,
+		TotalTokens:         inputTokens + outputTokens,
 	}
 	return detail
 }

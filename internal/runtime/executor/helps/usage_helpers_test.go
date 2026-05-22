@@ -71,10 +71,25 @@ func TestParseOpenAIUsageDeepSeek(t *testing.T) {
 	}
 }
 
-func TestParseOpenAIStreamUsageSkipsNullUsage(t *testing.T) {
-	line := []byte(`data: {"choices":[{"delta":{"content":"hello"}}],"usage":null}`)
-	if detail, ok := ParseOpenAIStreamUsage(line); ok {
-		t.Fatalf("ParseOpenAIStreamUsage ok = true, detail = %+v, want false", detail)
+func TestParseOpenAIUsageSkipsMissingTokenFields(t *testing.T) {
+	for _, data := range [][]byte{
+		[]byte(`{"usage":null}`),
+		[]byte(`{"usage":{}}`),
+	} {
+		if detail := ParseOpenAIUsage(data); detail != (coreusage.Detail{}) {
+			t.Fatalf("ParseOpenAIUsage(%s) = %+v, want zero detail", data, detail)
+		}
+	}
+}
+
+func TestParseOpenAIStreamUsageSkipsMissingTokenFields(t *testing.T) {
+	for _, line := range [][]byte{
+		[]byte(`data: {"choices":[{"delta":{"content":"hello"}}],"usage":null}`),
+		[]byte(`data: {"choices":[{"delta":{"content":"hello"}}],"usage":{}}`),
+	} {
+		if detail, ok := ParseOpenAIStreamUsage(line); ok {
+			t.Fatalf("ParseOpenAIStreamUsage(%s) ok = true, detail = %+v, want false", line, detail)
+		}
 	}
 }
 
@@ -259,5 +274,38 @@ func TestUsageReporterBuildRecordIncludesRequestMetrics(t *testing.T) {
 	}
 	if record.APIResponseBytes != 21 {
 		t.Fatalf("api response bytes = %d, want 21", record.APIResponseBytes)
+	}
+}
+
+func TestParseClaudeUsageIncludesCacheBreakdown(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":13,"output_tokens":4,"cache_read_input_tokens":22000,"cache_creation_input_tokens":31}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.InputTokens != 22044 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 22044)
+	}
+	if detail.OutputTokens != 4 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 4)
+	}
+	if detail.CachedTokens != 22000 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 22000)
+	}
+	if detail.CacheReadTokens != 22000 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 22000)
+	}
+	if detail.CacheCreationTokens != 31 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 31)
+	}
+	if detail.TotalTokens != 22048 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22048)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
+	ctx := coreusage.WithReasoningEffort(context.Background(), "medium")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(ctx, coreusage.Detail{TotalTokens: 3}, false)
+	if record.ReasoningEffort != "medium" {
+		t.Fatalf("reasoning effort = %q, want %q", record.ReasoningEffort, "medium")
 	}
 }

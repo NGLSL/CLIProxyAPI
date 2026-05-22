@@ -317,7 +317,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 				}
 
 				if projectID != "" {
-					log.Infof("Successfully fetched project_id: %s", projectID)
+					log.Infof("Successfully fetched project_id: %s", util.HideAPIKey(projectID))
 					return projectID, nil
 				}
 
@@ -340,5 +340,5 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		return "", fmt.Errorf("http %d: %s", resp.StatusCode, responseErr)
 	}
 
-	return "", nil
+	return "", fmt.Errorf("onboard user did not complete after %d attempts", maxAttempts)
 }

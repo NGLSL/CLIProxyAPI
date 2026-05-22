@@ -13,12 +13,14 @@ import (
 
 	proxyconfig "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/NGLSL/CLIProxyAPI/v6/sdk/access"
 	"github.com/NGLSL/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
 	gin "github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 type stubAccessProvider struct {
@@ -213,6 +215,44 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 				t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
 			}
 		})
+	}
+}
+
+func TestUnifiedModelsClientVersionPrefersCodexCatalog(t *testing.T) {
+	server := newTestServer(t)
+	modelID := "custom-codex-model-route-test"
+	registry.GetGlobalRegistry().RegisterClient("codex-client-model-route-test", "openai", []*registry.ModelInfo{{
+		ID:            modelID,
+		Object:        "model",
+		OwnedBy:       "openai",
+		Type:          "openai",
+		DisplayName:   "Custom Codex Route Model",
+		Description:   "Custom Codex route model from registry",
+		ContextLength: 654321,
+		Thinking:      &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient("codex-client-model-route-test")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.0.0", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("User-Agent", "claude-cli/1.0")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	body := recorder.Body.Bytes()
+	if gjson.GetBytes(body, "object").Exists() || gjson.GetBytes(body, "data").Exists() {
+		t.Fatalf("expected codex catalog format without object/data, got body=%s", body)
+	}
+	if got := gjson.GetBytes(body, `models.#(slug=="custom-codex-model-route-test").display_name`).String(); got != "Custom Codex Route Model" {
+		t.Fatalf("custom display_name = %q, want Custom Codex Route Model; body=%s", got, body)
+	}
+	if got := gjson.GetBytes(body, `models.#(slug=="custom-codex-model-route-test").context_window`).Int(); got != 654321 {
+		t.Fatalf("custom context_window = %d, want 654321; body=%s", got, body)
 	}
 }
 

@@ -10,6 +10,9 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+// ReasoningEffortMetadataKey stores the client-requested reasoning effort for usage logs.
+const ReasoningEffortMetadataKey = "reasoning_effort"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"

@@ -75,9 +75,33 @@ func newOpenAIChatTestRouter(t *testing.T, executor *chatCaptureExecutor) http.H
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIAPIHandler(base)
 	router := gin.New()
+	router.GET("/v1/models", h.OpenAIModels)
 	router.POST("/v1/chat/completions", h.ChatCompletions)
 	router.POST("/v1/completions", h.Completions)
 	return router
+}
+
+func TestOpenAIModelsClientVersionUsesCodexCatalogFormat(t *testing.T) {
+	executor := &chatCaptureExecutor{}
+	router := newOpenAIChatTestRouter(t, executor)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.0.0", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if gjson.GetBytes(resp.Body.Bytes(), "object").Exists() || gjson.GetBytes(resp.Body.Bytes(), "data").Exists() {
+		t.Fatalf("expected codex catalog format without object/data, got body=%s", resp.Body.String())
+	}
+	models := gjson.GetBytes(resp.Body.Bytes(), "models")
+	if !models.IsArray() || len(models.Array()) == 0 {
+		t.Fatalf("expected codex catalog models, got body=%s", resp.Body.String())
+	}
+	if got := gjson.GetBytes(resp.Body.Bytes(), "models.#(slug==\"test-model\").display_name").String(); got != "test-model" {
+		t.Fatalf("test-model display_name = %q, want test-model; body=%s", got, resp.Body.String())
+	}
 }
 
 func TestChatCompletionsRejectsResponsesPayload(t *testing.T) {

@@ -103,17 +103,20 @@ type RequestDetail struct {
 	Source             string     `json:"source"`
 	Alias              string     `json:"alias,omitempty"`
 	AuthIndex          string     `json:"auth_index"`
+	ReasoningEffort    string     `json:"reasoning_effort,omitempty"`
 	Tokens             TokenStats `json:"tokens"`
 	Failed             bool       `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
 type TokenStats struct {
-	InputTokens     int64 `json:"input_tokens"`
-	OutputTokens    int64 `json:"output_tokens"`
-	ReasoningTokens int64 `json:"reasoning_tokens"`
-	CachedTokens    int64 `json:"cached_tokens"`
-	TotalTokens     int64 `json:"total_tokens"`
+	InputTokens         int64 `json:"input_tokens"`
+	OutputTokens        int64 `json:"output_tokens"`
+	ReasoningTokens     int64 `json:"reasoning_tokens"`
+	CachedTokens        int64 `json:"cached_tokens"`
+	CacheReadTokens     int64 `json:"cache_read_tokens"`
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+	TotalTokens         int64 `json:"total_tokens"`
 }
 
 // StatisticsSnapshot represents an immutable view of the aggregated metrics.
@@ -239,6 +242,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		Source:             record.Source,
 		Alias:              strings.TrimSpace(record.Alias),
 		AuthIndex:          record.AuthIndex,
+		ReasoningEffort:    strings.TrimSpace(record.ReasoningEffort),
 		Tokens:             detail,
 		Failed:             failed,
 	})
@@ -498,6 +502,8 @@ func normaliseRestoredDetail(detail RequestDetail) RequestDetail {
 	detail.Tokens.OutputTokens = normaliseNonNegative(detail.Tokens.OutputTokens)
 	detail.Tokens.ReasoningTokens = normaliseNonNegative(detail.Tokens.ReasoningTokens)
 	detail.Tokens.CachedTokens = normaliseNonNegative(detail.Tokens.CachedTokens)
+	detail.Tokens.CacheReadTokens = normaliseNonNegative(detail.Tokens.CacheReadTokens)
+	detail.Tokens.CacheCreationTokens = normaliseNonNegative(detail.Tokens.CacheCreationTokens)
 	detail.Tokens.TotalTokens = normaliseNonNegative(detail.Tokens.TotalTokens)
 	if detail.LatencyMs < 0 {
 		detail.LatencyMs = 0
@@ -665,7 +671,7 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
@@ -676,6 +682,8 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 		tokens.OutputTokens,
 		tokens.ReasoningTokens,
 		tokens.CachedTokens,
+		tokens.CacheReadTokens,
+		tokens.CacheCreationTokens,
 		tokens.TotalTokens,
 	)
 }
@@ -724,17 +732,19 @@ const httpStatusBadRequest = 400
 
 func normaliseDetail(detail coreusage.Detail) TokenStats {
 	tokens := TokenStats{
-		InputTokens:     detail.InputTokens,
-		OutputTokens:    detail.OutputTokens,
-		ReasoningTokens: detail.ReasoningTokens,
-		CachedTokens:    detail.CachedTokens,
-		TotalTokens:     detail.TotalTokens,
+		InputTokens:         detail.InputTokens,
+		OutputTokens:        detail.OutputTokens,
+		ReasoningTokens:     detail.ReasoningTokens,
+		CachedTokens:        detail.CachedTokens,
+		CacheReadTokens:     detail.CacheReadTokens,
+		CacheCreationTokens: detail.CacheCreationTokens,
+		TotalTokens:         detail.TotalTokens,
 	}
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
 	}
 	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
+		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens + detail.CacheReadTokens + detail.CacheCreationTokens
 	}
 	return tokens
 }
@@ -744,7 +754,7 @@ func normaliseTokenStats(tokens TokenStats) TokenStats {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
 	}
 	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
+		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens + tokens.CacheReadTokens + tokens.CacheCreationTokens
 	}
 	return tokens
 }
