@@ -59,6 +59,7 @@ type commandFlags struct {
 	oauthCallbackPort  int
 	antigravityLogin   bool
 	kimiLogin          bool
+	xaiLogin           bool
 	projectID          string
 	vertexImport       string
 	vertexImportPrefix string
@@ -109,6 +110,7 @@ func parseCommandFlags() commandFlags {
 	flag.IntVar(&flagsState.oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&flagsState.antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&flagsState.kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
+	flag.BoolVar(&flagsState.xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.StringVar(&flagsState.projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&flagsState.configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&flagsState.vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -152,6 +154,8 @@ func handleCommandMode(cfg *config.Config, flagsState commandFlags, options *cmd
 		cmd.DoClaudeLogin(cfg, options)
 	case flagsState.kimiLogin:
 		cmd.DoKimiLogin(cfg, options)
+	case flagsState.xaiLogin:
+		cmd.DoXAILogin(cfg, options)
 	default:
 		return false
 	}

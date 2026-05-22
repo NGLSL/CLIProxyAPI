@@ -94,6 +94,11 @@ max-retry-interval: 30
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
+# disable-image-generation supports: false (default), true, or "chat".
+# - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
+# - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
+disable-image-generation: false
+
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
@@ -252,6 +257,7 @@ nonstream-keepalive-interval: 0
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2"               # The alias used in the API.
+#         image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.
@@ -320,7 +326,7 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
@@ -350,6 +356,9 @@ nonstream-keepalive-interval: 0
 #   kimi:
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"
+#   xai:
+#     - name: "grok-4.3"
+#       alias: "grok-latest"
 
 # OAuth provider excluded models
 # oauth-excluded-models:
@@ -370,6 +379,8 @@ nonstream-keepalive-interval: 0
 #     - "gpt-5-codex-mini"
 #   kimi:
 #     - "kimi-k2-thinking"
+#   xai:
+#     - "grok-3-mini"
 
 # Optional payload configuration
 # payload:

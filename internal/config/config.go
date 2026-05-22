@@ -135,7 +135,7 @@ type Config struct {
 
 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
 	// These aliases affect both model listing and model routing for supported channels:
-	// gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi.
+	// gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
@@ -336,8 +336,8 @@ type PayloadModelRule struct {
 	Protocol string `yaml:"protocol" json:"protocol"`
 	// Headers restricts the rule to requests whose headers match all configured wildcard patterns.
 	Headers map[string]string `yaml:"headers" json:"headers"`
-	// FormProtocol restricts the rule to a specific source protocol (e.g., "gemini", "responses").
-	FormProtocol string `yaml:"form-protocol" json:"form-protocol"`
+	// FromProtocol restricts the rule to a specific source protocol (e.g., "gemini", "responses").
+	FromProtocol string `yaml:"from-protocol" json:"from-protocol"`
 	// Match requires payload JSON paths to equal the configured values.
 	Match []map[string]any `yaml:"match" json:"match"`
 	// NotMatch requires payload JSON paths to not equal the configured values.
@@ -695,6 +695,9 @@ type OpenAICompatibilityModel struct {
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
 
+	// Image marks this model as callable through /v1/images/generations and /v1/images/edits.
+	Image bool `yaml:"image,omitempty" json:"image,omitempty"`
+
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
@@ -757,6 +760,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.QuotaCacheRefreshInterval = DefaultQuotaCacheRefreshInterval
 	cfg.DisableCooling = false
+	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient

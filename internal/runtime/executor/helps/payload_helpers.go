@@ -19,162 +19,187 @@ import (
 // and restricts matches to the given protocol when supplied. Defaults are checked
 // against the original payload when provided. requestedModel carries the client-visible
 // model name before alias resolution so payload rules can target aliases precisely.
-func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string) []byte {
+// requestPath is the inbound HTTP request path (when available) used for endpoint-scoped gates.
+func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string, requestPath string) []byte {
+	return ApplyPayloadConfigWithRequest(cfg, model, protocol, "", root, payload, original, requestedModel, requestPath, nil)
+}
+
+// ApplyPayloadConfigWithRequest applies payload config using source protocol and request header gates.
+func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header) []byte {
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
+	out := payload
+
+	// Apply disable-image-generation filtering before payload rules so config payload
+	// overrides can explicitly re-enable image_generation when desired.
+	if cfg.DisableImageGeneration != config.DisableImageGenerationOff {
+		if cfg.DisableImageGeneration != config.DisableImageGenerationChat || !isImagesEndpointRequestPath(requestPath) {
+			out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
+			out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
+		}
+	}
+
 	rules := cfg.Payload
 	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0
-	if !hasPayloadRules {
-		return payload
-	}
-
-	model = strings.TrimSpace(model)
-	requestedModel = strings.TrimSpace(requestedModel)
-	if model == "" && requestedModel == "" {
-		return payload
-	}
-
-	candidates := payloadModelCandidates(model, requestedModel)
-	out := payload
-	source := original
-	if len(source) == 0 {
-		source = payload
-	}
-	appliedDefaults := make(map[string]struct{})
-
-	// Apply default rules: first write wins per resolved field across all matching rules.
-	for i := range rules.Default {
-		rule := &rules.Default[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, "", nil, out, root, candidates) {
-			continue
-		}
-		for path, value := range rule.Params {
-			fullPath := buildPayloadPath(root, path)
-			if fullPath == "" {
-				continue
+	if hasPayloadRules {
+		model = strings.TrimSpace(model)
+		requestedModel = strings.TrimSpace(requestedModel)
+		if model != "" || requestedModel != "" {
+			candidates := payloadModelCandidates(model, requestedModel)
+			source := original
+			if len(source) == 0 {
+				source = payload
 			}
-			for _, resolvedPath := range resolvePayloadRulePaths(out, fullPath) {
-				if gjson.GetBytes(source, resolvedPath).Exists() {
+			appliedDefaults := make(map[string]struct{})
+			// Apply default rules: first write wins per field across all matching rules.
+			for i := range rules.Default {
+				rule := &rules.Default[i]
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
-				if _, ok := appliedDefaults[resolvedPath]; ok {
+				for path, value := range rule.Params {
+					fullPath := buildPayloadPath(root, path)
+					if fullPath == "" {
+						continue
+					}
+					for _, resolvedPath := range resolvePayloadRulePaths(out, fullPath) {
+						if gjson.GetBytes(source, resolvedPath).Exists() {
+							continue
+						}
+						if _, ok := appliedDefaults[resolvedPath]; ok {
+							continue
+						}
+						updated, errSet := sjson.SetBytes(out, resolvedPath, value)
+						if errSet != nil {
+							continue
+						}
+						out = updated
+						appliedDefaults[resolvedPath] = struct{}{}
+					}
+				}
+			}
+			// Apply default raw rules: first write wins per field across all matching rules.
+			for i := range rules.DefaultRaw {
+				rule := &rules.DefaultRaw[i]
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
-				updated, errSet := sjson.SetBytes(out, resolvedPath, value)
-				if errSet != nil {
+				for path, value := range rule.Params {
+					fullPath := buildPayloadPath(root, path)
+					if fullPath == "" {
+						continue
+					}
+					for _, resolvedPath := range resolvePayloadRulePaths(out, fullPath) {
+						if gjson.GetBytes(source, resolvedPath).Exists() {
+							continue
+						}
+						if _, ok := appliedDefaults[resolvedPath]; ok {
+							continue
+						}
+						rawValue, ok := payloadRawValue(value)
+						if !ok {
+							continue
+						}
+						updated, errSet := sjson.SetRawBytes(out, resolvedPath, rawValue)
+						if errSet != nil {
+							continue
+						}
+						out = updated
+						appliedDefaults[resolvedPath] = struct{}{}
+					}
+				}
+			}
+			// Apply override rules: last write wins per field across all matching rules.
+			for i := range rules.Override {
+				rule := &rules.Override[i]
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
-				out = updated
-				appliedDefaults[resolvedPath] = struct{}{}
+				for path, value := range rule.Params {
+					fullPath := buildPayloadPath(root, path)
+					if fullPath == "" {
+						continue
+					}
+					for _, resolvedPath := range resolvePayloadRulePaths(out, fullPath) {
+						updated, errSet := sjson.SetBytes(out, resolvedPath, value)
+						if errSet != nil {
+							continue
+						}
+						out = updated
+					}
+				}
 			}
-		}
-	}
-
-	// Apply default raw rules: first write wins per resolved field across all matching rules.
-	for i := range rules.DefaultRaw {
-		rule := &rules.DefaultRaw[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, "", nil, out, root, candidates) {
-			continue
-		}
-		for path, value := range rule.Params {
-			fullPath := buildPayloadPath(root, path)
-			if fullPath == "" {
-				continue
-			}
-			for _, resolvedPath := range resolvePayloadRulePaths(out, fullPath) {
-				if gjson.GetBytes(source, resolvedPath).Exists() {
+			// Apply override raw rules: last write wins per field across all matching rules.
+			for i := range rules.OverrideRaw {
+				rule := &rules.OverrideRaw[i]
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
-				if _, ok := appliedDefaults[resolvedPath]; ok {
+				for path, value := range rule.Params {
+					fullPath := buildPayloadPath(root, path)
+					if fullPath == "" {
+						continue
+					}
+					rawValue, ok := payloadRawValue(value)
+					if !ok {
+						continue
+					}
+					for _, resolvedPath := range resolvePayloadRulePaths(out, fullPath) {
+						updated, errSet := sjson.SetRawBytes(out, resolvedPath, rawValue)
+						if errSet != nil {
+							continue
+						}
+						out = updated
+					}
+				}
+			}
+			// Apply filter rules: remove matching paths from payload.
+			for i := range rules.Filter {
+				rule := &rules.Filter[i]
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
-				rawValue, ok := payloadRawValue(value)
-				if !ok {
-					continue
+				for _, path := range rule.Params {
+					fullPath := buildPayloadPath(root, path)
+					if fullPath == "" {
+						continue
+					}
+					resolvedPaths := resolvePayloadRulePaths(out, fullPath)
+					for i := len(resolvedPaths) - 1; i >= 0; i-- {
+						resolvedPath := resolvedPaths[i]
+						updated, errDel := sjson.DeleteBytes(out, resolvedPath)
+						if errDel != nil {
+							continue
+						}
+						out = updated
+					}
 				}
-				updated, errSet := sjson.SetRawBytes(out, resolvedPath, rawValue)
-				if errSet != nil {
-					continue
-				}
-				out = updated
-				appliedDefaults[resolvedPath] = struct{}{}
-			}
-		}
-	}
-
-	// Apply override rules: last write wins per resolved field across all matching rules.
-	for i := range rules.Override {
-		rule := &rules.Override[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, "", nil, out, root, candidates) {
-			continue
-		}
-		for path, value := range rule.Params {
-			fullPath := buildPayloadPath(root, path)
-			if fullPath == "" {
-				continue
-			}
-			for _, resolvedPath := range resolvePayloadRulePaths(out, fullPath) {
-				updated, errSet := sjson.SetBytes(out, resolvedPath, value)
-				if errSet != nil {
-					continue
-				}
-				out = updated
-			}
-		}
-	}
-
-	// Apply override raw rules: last write wins per resolved field across all matching rules.
-	for i := range rules.OverrideRaw {
-		rule := &rules.OverrideRaw[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, "", nil, out, root, candidates) {
-			continue
-		}
-		for path, value := range rule.Params {
-			fullPath := buildPayloadPath(root, path)
-			if fullPath == "" {
-				continue
-			}
-			rawValue, ok := payloadRawValue(value)
-			if !ok {
-				continue
-			}
-			for _, resolvedPath := range resolvePayloadRulePaths(out, fullPath) {
-				updated, errSet := sjson.SetRawBytes(out, resolvedPath, rawValue)
-				if errSet != nil {
-					continue
-				}
-				out = updated
-			}
-		}
-	}
-
-	// Apply filter rules: remove matching paths from payload. Delete in reverse order so
-	// multiple resolved array indexes remain stable while elements are removed.
-	for i := range rules.Filter {
-		rule := &rules.Filter[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, "", nil, out, root, candidates) {
-			continue
-		}
-		for _, path := range rule.Params {
-			fullPath := buildPayloadPath(root, path)
-			if fullPath == "" {
-				continue
-			}
-			resolvedPaths := resolvePayloadRulePaths(out, fullPath)
-			for i := len(resolvedPaths) - 1; i >= 0; i-- {
-				updated, errDel := sjson.DeleteBytes(out, resolvedPaths[i])
-				if errDel != nil {
-					continue
-				}
-				out = updated
 			}
 		}
 	}
 	return out
 }
 
-func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, formProtocol string, headers http.Header, payload []byte, root string, models []string) bool {
+func isImagesEndpointRequestPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	if path == "/v1/images/generations" || path == "/v1/images/edits" {
+		return true
+	}
+	// Be tolerant of prefix routers that may report a longer matched route.
+	if strings.HasSuffix(path, "/v1/images/generations") || strings.HasSuffix(path, "/v1/images/edits") {
+		return true
+	}
+	if strings.HasSuffix(path, "/images/generations") || strings.HasSuffix(path, "/images/edits") {
+		return true
+	}
+	return false
+}
+
+func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, fromProtocol string, headers http.Header, payload []byte, root string, models []string) bool {
 	if len(rules) == 0 || len(models) == 0 {
 		return false
 	}
@@ -187,7 +212,7 @@ func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, fo
 			if ep := strings.TrimSpace(entry.Protocol); ep != "" && protocol != "" && !strings.EqualFold(ep, protocol) {
 				continue
 			}
-			if !payloadFormProtocolMatches(entry.FormProtocol, formProtocol) {
+			if !payloadFromProtocolMatches(entry.FromProtocol, fromProtocol) {
 				continue
 			}
 			if !payloadHeadersMatch(headers, entry.Headers) {
@@ -218,70 +243,6 @@ func payloadModelRuleConditionsMatch(payload []byte, root string, rule config.Pa
 		return false
 	}
 	return true
-}
-
-func payloadFormProtocolMatches(pattern, formProtocol string) bool {
-	pattern = normalizePayloadFormProtocol(pattern)
-	if pattern == "" {
-		return true
-	}
-	formProtocol = normalizePayloadFormProtocol(formProtocol)
-	if formProtocol == "" {
-		return false
-	}
-	return strings.EqualFold(pattern, formProtocol)
-}
-
-func normalizePayloadFormProtocol(protocol string) string {
-	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	switch protocol {
-	case "openai-response", "openai-responses", "response":
-		return "responses"
-	case "gemini-cli":
-		return "gemini"
-	default:
-		return protocol
-	}
-}
-
-func payloadHeadersMatch(headers http.Header, rules map[string]string) bool {
-	if len(rules) == 0 {
-		return true
-	}
-	for key, pattern := range rules {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		values := payloadHeaderValues(headers, key)
-		if len(values) == 0 {
-			return false
-		}
-		matched := false
-		for _, value := range values {
-			if matchModelPattern(pattern, value) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
-	}
-	return true
-}
-
-func payloadHeaderValues(headers http.Header, key string) []string {
-	if headers == nil {
-		return nil
-	}
-	var values []string
-	for headerKey, headerValues := range headers {
-		if strings.EqualFold(headerKey, key) {
-			values = append(values, headerValues...)
-		}
-	}
-	return values
 }
 
 func payloadMatchConditionsMatch(payload []byte, root string, conditions []map[string]any) bool {
@@ -403,6 +364,70 @@ func normalizedPayloadJSON(data []byte) (any, bool) {
 		return nil, false
 	}
 	return out, true
+}
+
+func payloadFromProtocolMatches(pattern, fromProtocol string) bool {
+	pattern = normalizePayloadFromProtocol(pattern)
+	if pattern == "" {
+		return true
+	}
+	fromProtocol = normalizePayloadFromProtocol(fromProtocol)
+	if fromProtocol == "" {
+		return false
+	}
+	return strings.EqualFold(pattern, fromProtocol)
+}
+
+func normalizePayloadFromProtocol(protocol string) string {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	switch protocol {
+	case "openai-response", "openai-responses", "response":
+		return "responses"
+	case "gemini-cli":
+		return "gemini"
+	default:
+		return protocol
+	}
+}
+
+func payloadHeadersMatch(headers http.Header, rules map[string]string) bool {
+	if len(rules) == 0 {
+		return true
+	}
+	for key, pattern := range rules {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		values := payloadHeaderValues(headers, key)
+		if len(values) == 0 {
+			return false
+		}
+		matched := false
+		for _, value := range values {
+			if matchModelPattern(pattern, value) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func payloadHeaderValues(headers http.Header, key string) []string {
+	if headers == nil {
+		return nil
+	}
+	var values []string
+	for headerKey, headerValues := range headers {
+		if strings.EqualFold(headerKey, key) {
+			values = append(values, headerValues...)
+		}
+	}
+	return values
 }
 
 func payloadModelCandidates(model, requestedModel string) []string {
@@ -688,6 +713,95 @@ func payloadQueryTermMatches(item gjson.Result, term string) bool {
 	return gjson.GetBytes(wrapped, "#("+term+")").Exists()
 }
 
+func removeToolTypeFromPayloadWithRoot(payload []byte, root string, toolType string) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	toolType = strings.TrimSpace(toolType)
+	if toolType == "" {
+		return payload
+	}
+	toolsPath := buildPayloadPath(root, "tools")
+	return removeToolTypeFromToolsArray(payload, toolsPath, toolType)
+}
+
+func removeToolChoiceFromPayloadWithRoot(payload []byte, root string, toolType string) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	toolType = strings.TrimSpace(toolType)
+	if toolType == "" {
+		return payload
+	}
+	toolChoicePath := buildPayloadPath(root, "tool_choice")
+	return removeToolChoiceFromPayload(payload, toolChoicePath, toolType)
+}
+
+func removeToolChoiceFromPayload(payload []byte, toolChoicePath string, toolType string) []byte {
+	choice := gjson.GetBytes(payload, toolChoicePath)
+	if !choice.Exists() {
+		return payload
+	}
+	if choice.Type == gjson.String {
+		if strings.EqualFold(strings.TrimSpace(choice.String()), toolType) {
+			updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+			if errDel == nil {
+				return updated
+			}
+		}
+		return payload
+	}
+	if choice.Type != gjson.JSON {
+		return payload
+	}
+	choiceType := strings.TrimSpace(choice.Get("type").String())
+	if strings.EqualFold(choiceType, toolType) {
+		updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+		if errDel == nil {
+			return updated
+		}
+		return payload
+	}
+	if strings.EqualFold(choiceType, "tool") {
+		name := strings.TrimSpace(choice.Get("name").String())
+		if strings.EqualFold(name, toolType) {
+			updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+			if errDel == nil {
+				return updated
+			}
+		}
+	}
+	return payload
+}
+
+func removeToolTypeFromToolsArray(payload []byte, toolsPath string, toolType string) []byte {
+	tools := gjson.GetBytes(payload, toolsPath)
+	if !tools.Exists() || !tools.IsArray() {
+		return payload
+	}
+	removed := false
+	filtered := []byte(`[]`)
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() == toolType {
+			removed = true
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes(filtered, "-1", []byte(tool.Raw))
+		if errSet != nil {
+			continue
+		}
+		filtered = updated
+	}
+	if !removed {
+		return payload
+	}
+	updated, errSet := sjson.SetRawBytes(payload, toolsPath, filtered)
+	if errSet != nil {
+		return payload
+	}
+	return updated
+}
+
 func payloadRawValue(value any) ([]byte, bool) {
 	if value == nil {
 		return nil, false
@@ -732,6 +846,24 @@ func PayloadRequestedModel(opts cliproxyexecutor.Options, fallback string) strin
 		return trimmed
 	default:
 		return fallback
+	}
+}
+
+func PayloadRequestPath(opts cliproxyexecutor.Options) string {
+	if len(opts.Metadata) == 0 {
+		return ""
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.RequestPathMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
 	}
 }
 
