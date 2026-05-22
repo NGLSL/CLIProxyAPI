@@ -446,6 +446,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		}
 	}
 	newCtx, cancel := context.WithCancel(parentCtx)
+	newCtx = logging.WithResponseHeadersHolder(newCtx)
 	cancelCtx := newCtx
 	if requestCtx != nil && requestCtx != parentCtx {
 		go func() {

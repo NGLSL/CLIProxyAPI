@@ -101,7 +101,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
-	rawJSON, err := c.GetRawData()
+	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -194,7 +194,7 @@ func dropTopLevelMetadata(rawJSON []byte) []byte {
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
-	rawJSON, err := c.GetRawData()
+	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{

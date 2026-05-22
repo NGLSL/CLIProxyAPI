@@ -15,6 +15,7 @@ import (
 	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
@@ -156,6 +157,9 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 		}
 		c.Request.Body = newReplayedRequestBody(consumedPrefix, c.Request.Body)
 		body = bodyPrefix
+		if !truncated {
+			body = decodeCapturedRequestBodyForLog(bodyPrefix, c.Request.Header.Get("Content-Encoding"))
+		}
 		bodyTruncated = truncated
 	}
 
@@ -168,6 +172,58 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 		RequestID:     logging.GetGinRequestID(c),
 		Timestamp:     time.Now(),
 	}, nil
+}
+
+func decodeCapturedRequestBodyForLog(raw []byte, encoding string) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+
+	decoded, errDecode := decodeCapturedRequestBody(raw, encoding)
+	if errDecode != nil {
+		return raw
+	}
+	return decoded
+}
+
+func decodeCapturedRequestBody(raw []byte, encoding string) ([]byte, error) {
+	encoding = strings.TrimSpace(encoding)
+	if encoding == "" || strings.EqualFold(encoding, "identity") {
+		return raw, nil
+	}
+
+	parts := strings.Split(encoding, ",")
+	body := raw
+	for i := len(parts) - 1; i >= 0; i-- {
+		enc := strings.ToLower(strings.TrimSpace(parts[i]))
+		switch enc {
+		case "", "identity":
+			continue
+		case "zstd":
+			decoded, errDecode := decodeCapturedZstdRequestBody(body)
+			if errDecode != nil {
+				return nil, errDecode
+			}
+			body = decoded
+		default:
+			return nil, fmt.Errorf("unsupported request content encoding: %s", enc)
+		}
+	}
+	return body, nil
+}
+
+func decodeCapturedZstdRequestBody(raw []byte) ([]byte, error) {
+	decoder, errNewReader := zstd.NewReader(bytes.NewReader(raw))
+	if errNewReader != nil {
+		return nil, fmt.Errorf("failed to create zstd request decoder: %w", errNewReader)
+	}
+	defer decoder.Close()
+
+	decoded, errRead := io.ReadAll(decoder)
+	if errRead != nil {
+		return nil, fmt.Errorf("failed to decode zstd request body: %w", errRead)
+	}
+	return decoded, nil
 }
 
 func captureRequestBodyPrefix(body io.ReadCloser, limit int) ([]byte, []byte, bool, error) {

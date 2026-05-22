@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	internallogging "github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
 	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
@@ -142,6 +143,7 @@ func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, d
 		ResponseBytes:    metrics.ResponseBytes,
 		APIResponseBytes: metrics.APIResponseBytes,
 		Detail:           detail,
+		ResponseHeaders:  internallogging.GetResponseHeaders(ctx),
 	}
 }
 
