@@ -293,8 +293,11 @@ func (e *GeminiVertexExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	return e.countTokensWithAPIKey(ctx, auth, req, opts, apiKey, baseURL)
 }
 
-// Refresh refreshes the authentication credentials (no-op for Vertex).
-func (e *GeminiVertexExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+// Refresh refreshes the authentication credentials when Home handles Vertex auths.
+func (e *GeminiVertexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	return auth, nil
 }
 

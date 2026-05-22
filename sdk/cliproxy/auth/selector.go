@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"math/rand/v2"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/tidwall/gjson"
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
@@ -424,4 +427,281 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
+}
+
+var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
+
+// ExtractSessionID extracts a stable session identifier from request metadata, headers, or body.
+func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
+	primary, _ := extractSessionIDs(headers, payload, metadata)
+	return primary
+}
+
+func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]any) (string, string) {
+	if len(payload) > 0 {
+		userID := gjson.GetBytes(payload, "metadata.user_id").String()
+		if userID != "" {
+			if matches := sessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
+				return "claude:" + matches[1], ""
+			}
+			if len(userID) > 0 && userID[0] == '{' {
+				if sid := gjson.Get(userID, "session_id").String(); sid != "" {
+					return "claude:" + sid, ""
+				}
+			}
+		}
+	}
+
+	if headers != nil {
+		if sid := strings.TrimSpace(headers.Get("X-Session-ID")); sid != "" {
+			return "header:" + sid, ""
+		}
+		if sid := strings.TrimSpace(headers.Get("Session_id")); sid != "" {
+			return "codex:" + sid, ""
+		}
+		if tid := strings.TrimSpace(headers.Get("X-Amp-Thread-Id")); tid != "" {
+			return "amp:" + tid, ""
+		}
+		if rid := strings.TrimSpace(headers.Get("X-Client-Request-Id")); rid != "" {
+			return "clientreq:" + rid, ""
+		}
+	}
+
+	if len(metadata) > 0 {
+		if raw := metadata[cliproxyexecutor.ExecutionSessionMetadataKey]; raw != nil {
+			if sessionID := metadataStringValue(raw); sessionID != "" {
+				return "execution:" + sessionID, ""
+			}
+		}
+	}
+
+	if len(payload) == 0 {
+		return "", ""
+	}
+
+	userID := gjson.GetBytes(payload, "metadata.user_id").String()
+	if userID != "" {
+		return "user:" + userID, ""
+	}
+	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
+		return "conv:" + convID, ""
+	}
+	return extractMessageHashIDs(payload)
+}
+
+func metadataStringValue(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
+	}
+}
+
+func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
+	var systemPrompt, firstUserMsg, firstAssistantMsg string
+
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			role := msg.Get("role").String()
+			content := extractMessageContent(msg.Get("content"))
+			if content == "" {
+				return true
+			}
+			switch role {
+			case "system":
+				if systemPrompt == "" {
+					systemPrompt = truncateString(content, 100)
+				}
+			case "user":
+				if firstUserMsg == "" {
+					firstUserMsg = truncateString(content, 100)
+				}
+			case "assistant":
+				if firstAssistantMsg == "" {
+					firstAssistantMsg = truncateString(content, 100)
+				}
+			}
+			return systemPrompt == "" || firstUserMsg == "" || firstAssistantMsg == ""
+		})
+	}
+
+	if systemPrompt == "" {
+		topSystem := gjson.GetBytes(payload, "system")
+		if topSystem.Exists() {
+			if topSystem.IsArray() {
+				topSystem.ForEach(func(_, part gjson.Result) bool {
+					if text := part.Get("text").String(); text != "" && systemPrompt == "" {
+						systemPrompt = truncateString(text, 100)
+						return false
+					}
+					return true
+				})
+			} else if topSystem.Type == gjson.String {
+				systemPrompt = truncateString(topSystem.String(), 100)
+			}
+		}
+	}
+
+	if systemPrompt == "" && firstUserMsg == "" {
+		sysInstr := gjson.GetBytes(payload, "systemInstruction.parts")
+		if sysInstr.Exists() && sysInstr.IsArray() {
+			sysInstr.ForEach(func(_, part gjson.Result) bool {
+				if text := part.Get("text").String(); text != "" && systemPrompt == "" {
+					systemPrompt = truncateString(text, 100)
+					return false
+				}
+				return true
+			})
+		}
+
+		contents := gjson.GetBytes(payload, "contents")
+		if contents.Exists() && contents.IsArray() {
+			contents.ForEach(func(_, msg gjson.Result) bool {
+				role := msg.Get("role").String()
+				msg.Get("parts").ForEach(func(_, part gjson.Result) bool {
+					text := part.Get("text").String()
+					if text == "" {
+						return true
+					}
+					switch role {
+					case "user":
+						if firstUserMsg == "" {
+							firstUserMsg = truncateString(text, 100)
+						}
+					case "model":
+						if firstAssistantMsg == "" {
+							firstAssistantMsg = truncateString(text, 100)
+						}
+					}
+					return false
+				})
+				return firstUserMsg == "" || firstAssistantMsg == ""
+			})
+		}
+	}
+
+	if systemPrompt == "" && firstUserMsg == "" {
+		if instr := gjson.GetBytes(payload, "instructions").String(); instr != "" {
+			systemPrompt = truncateString(instr, 100)
+		}
+
+		input := gjson.GetBytes(payload, "input")
+		if input.Exists() && input.IsArray() {
+			input.ForEach(func(_, item gjson.Result) bool {
+				itemType := item.Get("type").String()
+				if itemType == "reasoning" || (itemType != "" && itemType != "message") {
+					return true
+				}
+				role := item.Get("role").String()
+				if itemType == "" && role == "" {
+					return true
+				}
+				content := item.Get("content")
+				text := ""
+				if content.Type == gjson.String {
+					text = content.String()
+				} else {
+					text = extractResponsesAPIContent(content)
+				}
+				if text == "" {
+					return true
+				}
+				switch role {
+				case "developer", "system":
+					if systemPrompt == "" {
+						systemPrompt = truncateString(text, 100)
+					}
+				case "user":
+					if firstUserMsg == "" {
+						firstUserMsg = truncateString(text, 100)
+					}
+				case "assistant":
+					if firstAssistantMsg == "" {
+						firstAssistantMsg = truncateString(text, 100)
+					}
+				}
+				return firstUserMsg == "" || firstAssistantMsg == ""
+			})
+		}
+	}
+
+	if systemPrompt == "" && firstUserMsg == "" {
+		return "", ""
+	}
+	shortHash := computeSessionHash(systemPrompt, firstUserMsg, "")
+	if firstAssistantMsg == "" {
+		return shortHash, ""
+	}
+	fullHash := computeSessionHash(systemPrompt, firstUserMsg, firstAssistantMsg)
+	return fullHash, shortHash
+}
+
+func computeSessionHash(systemPrompt, userMsg, assistantMsg string) string {
+	h := fnv.New64a()
+	if systemPrompt != "" {
+		_, _ = h.Write([]byte("sys:" + systemPrompt + "\n"))
+	}
+	if userMsg != "" {
+		_, _ = h.Write([]byte("usr:" + userMsg + "\n"))
+	}
+	if assistantMsg != "" {
+		_, _ = h.Write([]byte("ast:" + assistantMsg + "\n"))
+	}
+	return fmt.Sprintf("msg:%016x", h.Sum64())
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) > maxLen {
+		return s[:maxLen]
+	}
+	return s
+}
+
+func extractMessageContent(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	if content.IsArray() {
+		var texts []string
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" {
+				if text := part.Get("text").String(); text != "" {
+					texts = append(texts, text)
+				}
+			}
+			return true
+		})
+		if len(texts) > 0 {
+			return strings.Join(texts, " ")
+		}
+	}
+	return ""
+}
+
+func extractResponsesAPIContent(content gjson.Result) string {
+	if !content.IsArray() {
+		return ""
+	}
+	var texts []string
+	content.ForEach(func(_, part gjson.Result) bool {
+		partType := part.Get("type").String()
+		if partType == "input_text" || partType == "output_text" || partType == "text" {
+			if text := part.Get("text").String(); text != "" {
+				texts = append(texts, text)
+			}
+		}
+		return true
+	})
+	if len(texts) > 0 {
+		return strings.Join(texts, " ")
+	}
+	return ""
+}
+
+func extractSessionID(payload []byte) string {
+	return ExtractSessionID(nil, payload, nil)
 }

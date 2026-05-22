@@ -5,6 +5,7 @@ package cliproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/api"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/home"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/runtime/executor"
 	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
@@ -35,6 +37,9 @@ type Service struct {
 
 	// cfgMu protects concurrent access to the configuration.
 	cfgMu sync.RWMutex
+
+	// configUpdateMu serializes config updates across file watcher and Home subscriber.
+	configUpdateMu sync.Mutex
 
 	// configPath is the path to the configuration file.
 	configPath string
@@ -89,6 +94,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	homeClient *home.Client
+	homeCancel context.CancelFunc
 
 	usagePersistenceCancel       context.CancelFunc
 	usagePersistenceDone         chan struct{}
@@ -869,6 +877,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	// This operation may block on network calls, but the auth configuration
 	// is already effective at this point.
 	s.registerModelsForAuth(auth)
+	s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
 
 	// Refresh the scheduler entry so that the auth's supportedModelSet is rebuilt
 	// from the now-populated global model registry. Without this, newly added auths
@@ -1021,6 +1030,280 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
+func (s *Service) applyConfigUpdate(newCfg *config.Config) {
+	if s == nil {
+		return
+	}
+
+	s.configUpdateMu.Lock()
+	defer s.configUpdateMu.Unlock()
+
+	previousStrategy := ""
+	s.cfgMu.RLock()
+	if s.cfg != nil {
+		previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+	}
+	s.cfgMu.RUnlock()
+
+	if newCfg == nil {
+		s.cfgMu.RLock()
+		newCfg = s.cfg
+		s.cfgMu.RUnlock()
+	}
+	if newCfg == nil {
+		return
+	}
+	if newCfg.Home.Enabled {
+		forceHomeRuntimeConfig(newCfg)
+	}
+
+	nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
+	normalizeStrategy := func(strategy string) string {
+		switch strategy {
+		case "fill-first", "fillfirst", "ff":
+			return "fill-first"
+		case "sticky-round-robin", "sticky-roundrobin", "stickyroundrobin", "srr":
+			return "sticky-round-robin"
+		default:
+			return "round-robin"
+		}
+	}
+	previousStrategy = normalizeStrategy(previousStrategy)
+	nextStrategy = normalizeStrategy(nextStrategy)
+	if s.coreManager != nil && previousStrategy != nextStrategy {
+		var selector coreauth.Selector
+		switch nextStrategy {
+		case "fill-first":
+			selector = &coreauth.FillFirstSelector{}
+		case "sticky-round-robin":
+			selector = &coreauth.StickyRoundRobinSelector{}
+		default:
+			selector = &coreauth.RoundRobinSelector{}
+		}
+		s.coreManager.SetSelector(selector)
+	}
+
+	wasUsageEnabled := internalusage.StatisticsEnabled()
+	s.applyRetryConfig(newCfg)
+	s.applyPprofConfig(newCfg)
+	if s.server != nil {
+		s.server.UpdateClients(newCfg)
+	}
+	s.cfgMu.Lock()
+	s.cfg = newCfg
+	s.cfgMu.Unlock()
+	if s.configureUsageStatisticsEnabled() {
+		if !wasUsageEnabled {
+			s.restoreUsageSnapshot()
+		}
+		s.startUsagePersistence(context.Background())
+	} else {
+		s.stopUsagePersistence()
+	}
+	if s.coreManager != nil {
+		s.coreManager.SetConfig(newCfg)
+		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+		if !newCfg.Home.Enabled {
+			runtimeSnapshot := s.restoreAuthRuntimeSnapshot()
+			s.restoreWatcherSnapshotAuths()
+			if len(s.applyAuthRuntimeSnapshot(runtimeSnapshot)) == 0 {
+				s.reapplyAllModelRegistrations()
+			}
+			s.startAuthRuntimePersistence(context.Background())
+		} else {
+			s.registerHomeExecutors()
+		}
+	}
+	s.rebindExecutors()
+}
+
+func forceHomeRuntimeConfig(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.APIKeys = nil
+	cfg.UsageStatisticsEnabled = true
+	cfg.DisableCooling = true
+	cfg.WebsocketAuth = false
+	cfg.EnableGeminiCLIEndpoint = false
+	cfg.RemoteManagement.AllowRemote = false
+	cfg.RemoteManagement.DisableControlPanel = true
+}
+
+func (s *Service) registerHomeExecutors() {
+	if s == nil || s.coreManager == nil || s.cfg == nil {
+		return
+	}
+
+	// Home-dispatched auth records are not loaded from the local auth directory, so
+	// baseline executors must be present before the first dispatch response arrives.
+	s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(s.cfg, "", s.wsGateway))
+	s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("openai-compatibility", s.cfg))
+}
+
+func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {
+	if s == nil || remoteCfg == nil {
+		return
+	}
+
+	s.cfgMu.RLock()
+	baseCfg := s.cfg
+	s.cfgMu.RUnlock()
+	if baseCfg == nil {
+		return
+	}
+
+	merged := *remoteCfg
+	merged.Host = baseCfg.Host
+	merged.Port = baseCfg.Port
+	merged.TLS = baseCfg.TLS
+	merged.Home = baseCfg.Home
+	forceHomeRuntimeConfig(&merged)
+	s.applyConfigUpdate(&merged)
+}
+
+type homeUsageForwarder struct {
+	ctx    context.Context
+	client *home.Client
+	queue  chan []byte
+}
+
+func (f *homeUsageForwarder) HandleUsage(_ context.Context, record coreusage.Record) {
+	if f == nil || f.client == nil || f.ctx == nil {
+		return
+	}
+	select {
+	case <-f.ctx.Done():
+		return
+	default:
+	}
+	raw, errMarshal := json.Marshal(record)
+	if errMarshal != nil {
+		log.Warnf("failed to marshal home usage record: %v", errMarshal)
+		return
+	}
+	select {
+	case f.queue <- raw:
+	default:
+		log.Debug("home usage forwarding queue is full; dropping usage record")
+	}
+}
+
+func (f *homeUsageForwarder) run() {
+	if f == nil || f.ctx == nil || f.client == nil {
+		return
+	}
+	for {
+		select {
+		case <-f.ctx.Done():
+			return
+		case payload := <-f.queue:
+			f.forward(payload)
+		}
+	}
+}
+
+func (f *homeUsageForwarder) forward(payload []byte) {
+	for {
+		select {
+		case <-f.ctx.Done():
+			return
+		default:
+		}
+		if f.client.HeartbeatOK() {
+			if errPush := f.client.LPushUsage(f.ctx, payload); errPush == nil {
+				return
+			} else {
+				log.Debugf("failed to forward usage record to home: %v", errPush)
+			}
+		}
+		if !sleepWithContext(f.ctx, time.Second) {
+			return
+		}
+	}
+}
+
+func (s *Service) startHomeUsageForwarder(ctx context.Context, client *home.Client) {
+	if s == nil || client == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	forwarder := &homeUsageForwarder{
+		ctx:    ctx,
+		client: client,
+		queue:  make(chan []byte, 256),
+	}
+	coreusage.RegisterPlugin(forwarder)
+	go forwarder.run()
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (s *Service) startHomeSubscriber(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg == nil || !cfg.Home.Enabled {
+		return
+	}
+
+	if s.homeCancel != nil {
+		s.homeCancel()
+		s.homeCancel = nil
+	}
+	if s.homeClient != nil {
+		s.homeClient.Close()
+		s.homeClient = nil
+	}
+
+	homeCtx := ctx
+	if homeCtx == nil {
+		homeCtx = context.Background()
+	}
+	homeCtx, cancel := context.WithCancel(homeCtx)
+	s.homeCancel = cancel
+
+	client := home.New(cfg.Home)
+	s.homeClient = client
+	home.SetCurrent(client)
+
+	go client.StartConfigSubscriber(homeCtx, func(raw []byte) error {
+		parsed, errParse := config.ParseConfigBytes(raw)
+		if errParse != nil {
+			log.Warnf("failed to parse home config payload: %v", errParse)
+			return errParse
+		}
+		s.applyHomeOverlay(parsed)
+		return nil
+	})
+	s.startHomeUsageForwarder(homeCtx, client)
+}
+
 // Run starts the service and blocks until the context is cancelled or the server stops.
 // It initializes all components including authentication, file watching, HTTP server,
 // and starts processing requests. The method blocks until the context is cancelled.
@@ -1038,6 +1321,10 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
+	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
+	if homeEnabled {
+		forceHomeRuntimeConfig(s.cfg)
+	}
 	enabled := s.configureUsageStatisticsEnabled()
 	coreusage.StartDefault(ctx)
 	internalusage.ResetDefaultRequestStatistics()
@@ -1054,14 +1341,16 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}()
 
-	if err := s.ensureAuthDir(); err != nil {
-		return err
+	if !homeEnabled {
+		if errEnsureAuthDir := s.ensureAuthDir(); errEnsureAuthDir != nil {
+			return errEnsureAuthDir
+		}
 	}
 
 	s.applyRetryConfig(s.cfg)
 
-	runtimeSnapshot := s.restoreAuthRuntimeSnapshot()
-	if s.coreManager != nil {
+	if s.coreManager != nil && !homeEnabled {
+		runtimeSnapshot := s.restoreAuthRuntimeSnapshot()
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		} else {
@@ -1071,25 +1360,25 @@ func (s *Service) Run(ctx context.Context) error {
 				log.Infof("applied auth runtime snapshot to %d stored auth(s)", len(applied))
 			}
 		}
-	}
-	if s.coreManager != nil {
 		s.startAuthRuntimePersistence(ctx)
 	}
 
-	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return err
-	}
-	if tokenResult == nil {
-		tokenResult = &TokenClientResult{}
-	}
+	if !homeEnabled {
+		tokenResult, errLoadTokens := s.tokenProvider.Load(ctx, s.cfg)
+		if errLoadTokens != nil && !errors.Is(errLoadTokens, context.Canceled) {
+			return errLoadTokens
+		}
+		if tokenResult == nil {
+			tokenResult = &TokenClientResult{}
+		}
 
-	apiKeyResult, err := s.apiKeyProvider.Load(ctx, s.cfg)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return err
-	}
-	if apiKeyResult == nil {
-		apiKeyResult = &APIKeyClientResult{}
+		apiKeyResult, errLoadAPIKeys := s.apiKeyProvider.Load(ctx, s.cfg)
+		if errLoadAPIKeys != nil && !errors.Is(errLoadAPIKeys, context.Canceled) {
+			return errLoadAPIKeys
+		}
+		if apiKeyResult == nil {
+			apiKeyResult = &APIKeyClientResult{}
+		}
 	}
 
 	// legacy clients removed; no caches to refresh
@@ -1099,6 +1388,10 @@ func (s *Service) Run(ctx context.Context) error {
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
+	}
+
+	if homeEnabled {
+		s.startHomeSubscriber(ctx)
 	}
 
 	s.ensureWebsocketGateway()
@@ -1120,6 +1413,10 @@ func (s *Service) Run(ctx context.Context) error {
 			}
 			log.Debugf("ws-auth disabled; existing websocket sessions remain connected")
 		})
+	}
+
+	if homeEnabled {
+		s.registerHomeExecutors()
 	}
 
 	if s.hooks.OnBeforeStart != nil {
@@ -1182,101 +1479,31 @@ func (s *Service) Run(ctx context.Context) error {
 		s.hooks.OnAfterStart(s)
 	}
 
-	var watcherWrapper *WatcherWrapper
-	reloadCallback := func(newCfg *config.Config) {
-		previousStrategy := ""
-		s.cfgMu.RLock()
-		if s.cfg != nil {
-			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
-		}
-		s.cfgMu.RUnlock()
+	if !homeEnabled {
+		reloadCallback := func(newCfg *config.Config) { s.applyConfigUpdate(newCfg) }
 
-		if newCfg == nil {
-			s.cfgMu.RLock()
-			newCfg = s.cfg
-			s.cfgMu.RUnlock()
+		watcherWrapper, errCreateWatcher := s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
+		if errCreateWatcher != nil {
+			return fmt.Errorf("cliproxy: failed to create watcher: %w", errCreateWatcher)
 		}
-		if newCfg == nil {
-			return
+		s.watcher = watcherWrapper
+		s.ensureAuthUpdateQueue(ctx)
+		if s.authUpdates != nil {
+			watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 		}
+		watcherWrapper.SetConfig(s.cfg)
 
-		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-		normalizeStrategy := func(strategy string) string {
-			switch strategy {
-			case "fill-first", "fillfirst", "ff":
-				return "fill-first"
-			case "sticky-round-robin", "sticky-roundrobin", "stickyroundrobin", "srr":
-				return "sticky-round-robin"
-			default:
-				return "round-robin"
-			}
+		watcherCtx, watcherCancel := context.WithCancel(context.Background())
+		s.watcherCancel = watcherCancel
+		if errStartWatcher := watcherWrapper.Start(watcherCtx); errStartWatcher != nil {
+			return fmt.Errorf("cliproxy: failed to start watcher: %w", errStartWatcher)
 		}
-		previousStrategy = normalizeStrategy(previousStrategy)
-		nextStrategy = normalizeStrategy(nextStrategy)
-		if s.coreManager != nil && previousStrategy != nextStrategy {
-			var selector coreauth.Selector
-			switch nextStrategy {
-			case "fill-first":
-				selector = &coreauth.FillFirstSelector{}
-			case "sticky-round-robin":
-				selector = &coreauth.StickyRoundRobinSelector{}
-			default:
-				selector = &coreauth.RoundRobinSelector{}
-			}
-			s.coreManager.SetSelector(selector)
-		}
-
-		wasUsageEnabled := internalusage.StatisticsEnabled()
-		s.applyRetryConfig(newCfg)
-		s.applyPprofConfig(newCfg)
-		if s.server != nil {
-			s.server.UpdateClients(newCfg)
-		}
-		s.cfgMu.Lock()
-		s.cfg = newCfg
-		s.cfgMu.Unlock()
-		if s.configureUsageStatisticsEnabled() {
-			if !wasUsageEnabled {
-				s.restoreUsageSnapshot()
-			}
-			s.startUsagePersistence(context.Background())
-		} else {
-			s.stopUsagePersistence()
-		}
-		if s.coreManager != nil {
-			s.coreManager.SetConfig(newCfg)
-			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
-			runtimeSnapshot := s.restoreAuthRuntimeSnapshot()
-			s.restoreWatcherSnapshotAuths()
-			if len(s.applyAuthRuntimeSnapshot(runtimeSnapshot)) == 0 {
-				s.reapplyAllModelRegistrations()
-			}
-			s.startAuthRuntimePersistence(context.Background())
-		}
-		s.rebindExecutors()
+		log.Info("file watcher started for config and auth directory changes")
+		s.restoreWatcherSnapshotAuths()
 	}
-
-	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
-	if err != nil {
-		return fmt.Errorf("cliproxy: failed to create watcher: %w", err)
-	}
-	s.watcher = watcherWrapper
-	s.ensureAuthUpdateQueue(ctx)
-	if s.authUpdates != nil {
-		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
-	}
-	watcherWrapper.SetConfig(s.cfg)
-
-	watcherCtx, watcherCancel := context.WithCancel(context.Background())
-	s.watcherCancel = watcherCancel
-	if err = watcherWrapper.Start(watcherCtx); err != nil {
-		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
-	}
-	log.Info("file watcher started for config and auth directory changes")
-	s.restoreWatcherSnapshotAuths()
 
 	// Prefer core auth manager auto refresh if available.
-	if s.coreManager != nil {
+	if s.coreManager != nil && !homeEnabled {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
@@ -1286,8 +1513,8 @@ func (s *Service) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		log.Debug("service context cancelled, shutting down...")
 		return ctx.Err()
-	case err = <-s.serverErr:
-		return err
+	case errServer := <-s.serverErr:
+		return errServer
 	}
 }
 
@@ -1309,6 +1536,16 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if ctx == nil {
 			ctx = context.Background()
 		}
+
+		if s.homeCancel != nil {
+			s.homeCancel()
+			s.homeCancel = nil
+		}
+		if s.homeClient != nil {
+			s.homeClient.Close()
+			s.homeClient = nil
+		}
+		home.ClearCurrent()
 
 		// legacy refresh loop removed; only stopping core auth manager below
 

@@ -20,6 +20,7 @@ import (
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/cmd"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/home"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/misc"
@@ -51,23 +52,25 @@ func init() {
 }
 
 type commandFlags struct {
-	login              bool
-	codexLogin         bool
-	codexDeviceLogin   bool
-	claudeLogin        bool
-	noBrowser          bool
-	oauthCallbackPort  int
-	antigravityLogin   bool
-	kimiLogin          bool
-	xaiLogin           bool
-	projectID          string
-	vertexImport       string
-	vertexImportPrefix string
-	configPath         string
-	password           string
-	tuiMode            bool
-	standalone         bool
-	localModel         bool
+	login                       bool
+	codexLogin                  bool
+	codexDeviceLogin            bool
+	claudeLogin                 bool
+	noBrowser                   bool
+	oauthCallbackPort           int
+	antigravityLogin            bool
+	kimiLogin                   bool
+	xaiLogin                    bool
+	projectID                   string
+	vertexImport                string
+	vertexImportPrefix          string
+	configPath                  string
+	password                    string
+	homeJWT                     string
+	homeDisableClusterDiscovery bool
+	tuiMode                     bool
+	standalone                  bool
+	localModel                  bool
 }
 
 func configureFlagUsage() {
@@ -116,6 +119,8 @@ func parseCommandFlags() commandFlags {
 	flag.StringVar(&flagsState.vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&flagsState.vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&flagsState.password, "password", "", "")
+	flag.StringVar(&flagsState.homeJWT, "home-jwt", "", "Home control plane JWT for mTLS certificate bootstrap and connection")
+	flag.BoolVar(&flagsState.homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home-jwt address")
 	flag.BoolVar(&flagsState.tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&flagsState.standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&flagsState.localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
@@ -163,11 +168,13 @@ func handleCommandMode(cfg *config.Config, flagsState commandFlags, options *cmd
 	return true
 }
 
-func startRuntimeUpdaters(configFilePath string, localModel bool) {
+func startRuntimeUpdaters(configFilePath string, localModel bool, homeEnabled bool) {
 	managementasset.StartAutoUpdater(context.Background(), configFilePath)
 	misc.StartAntigravityVersionUpdater(context.Background())
-	if !localModel {
+	if !localModel && !homeEnabled {
 		registry.StartModelsUpdater(context.Background())
+	} else if homeEnabled {
+		log.Info("Home mode: remote model updates disabled")
 	}
 }
 
@@ -237,7 +244,7 @@ func runStandaloneTUI(cfg *config.Config, configFilePath string, password string
 
 func runTUI(cfg *config.Config, configFilePath string, password string, standalone bool, localModel bool) {
 	if standalone {
-		startRuntimeUpdaters(configFilePath, localModel)
+		startRuntimeUpdaters(configFilePath, localModel, cfg.Home.Enabled)
 		runStandaloneTUI(cfg, configFilePath, password)
 		return
 	}
@@ -260,7 +267,7 @@ func runApplicationMode(cfg *config.Config, configFilePath string, flagsState co
 		return
 	}
 
-	startRuntimeUpdaters(configFilePath, flagsState.localModel)
+	startRuntimeUpdaters(configFilePath, flagsState.localModel, cfg.Home.Enabled)
 	cmd.StartService(cfg, configFilePath, flagsState.password)
 }
 
@@ -280,6 +287,7 @@ func main() {
 	var err error
 	var cfg *config.Config
 	var isCloudDeploy bool
+	var configLoadedFromHome bool
 	var (
 		usePostgresStore     bool
 		pgStoreDSN           string
@@ -327,6 +335,11 @@ func main() {
 		return "", false
 	}
 	writableBase := util.WritablePath()
+	if strings.TrimSpace(flagsState.homeJWT) == "" {
+		if value, ok := lookupEnv("HOME_JWT", "home_jwt"); ok {
+			flagsState.homeJWT = value
+		}
+	}
 	if value, ok := lookupEnv("PGSTORE_DSN", "pgstore_dsn"); ok {
 		usePostgresStore = true
 		pgStoreDSN = value
@@ -390,7 +403,52 @@ func main() {
 	// Determine and load the configuration file.
 	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
 	var configFilePath string
-	if usePostgresStore {
+	if strings.TrimSpace(flagsState.homeJWT) != "" {
+		configLoadedFromHome = true
+		ctxHome, cancelHome := context.WithTimeout(context.Background(), 30*time.Second)
+		homeCfg, errHomeCfg := home.ConfigFromJWT(ctxHome, flagsState.homeJWT)
+		cancelHome()
+		if errHomeCfg != nil {
+			log.Errorf("invalid -home-jwt: %v", errHomeCfg)
+			return
+		}
+		if flagsState.homeDisableClusterDiscovery {
+			homeCfg.DisableClusterDiscovery = true
+		}
+		homeClient := home.New(homeCfg)
+		defer homeClient.Close()
+
+		ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
+		raw, errGetConfig := homeClient.GetConfig(ctxHomeConfig)
+		cancelHomeConfig()
+		if errGetConfig != nil {
+			log.Errorf("failed to fetch config from home: %v", errGetConfig)
+			return
+		}
+
+		parsed, errParseConfig := config.ParseConfigBytes(raw)
+		if errParseConfig != nil {
+			log.Errorf("failed to parse config payload from home: %v", errParseConfig)
+			return
+		}
+		if parsed == nil {
+			parsed = &config.Config{}
+		}
+		parsed.Home = homeCfg
+		parsed.Port = 8317
+		parsed.UsageStatisticsEnabled = true
+		cfg = parsed
+
+		if strings.TrimSpace(configPath) != "" {
+			configFilePath = configPath
+		} else {
+			configFilePath = filepath.Join(wd, "config.yaml")
+		}
+
+		usePostgresStore = false
+		useObjectStore = false
+		useGitStore = false
+	} else if usePostgresStore {
 		if pgStoreLocalPath == "" {
 			pgStoreLocalPath = wd
 		}
@@ -554,7 +612,9 @@ func main() {
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool
 	if isCloudDeploy {
-		if info, errStat := os.Stat(configFilePath); errStat != nil {
+		if configLoadedFromHome && cfg != nil {
+			configFileExists = cfg.Port != 0
+		} else if info, errStat := os.Stat(configFilePath); errStat != nil {
 			// Don't mislead: API server will not start until configuration is provided.
 			log.Info("Cloud deploy mode: No configuration file detected; standing by for configuration")
 			configFileExists = false

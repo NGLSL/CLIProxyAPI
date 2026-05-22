@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -23,11 +25,26 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/buildinfo"
+	"github.com/NGLSL/CLIProxyAPI/v6/internal/home"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
 )
 
 var requestLogID atomic.Uint64
+
+type homeRequestLogClient interface {
+	HeartbeatOK() bool
+	RPushRequestLog(ctx context.Context, payload []byte) error
+}
+
+var currentHomeRequestLogClient = func() homeRequestLogClient {
+	return home.Current()
+}
+
+type homeRequestLogPayload struct {
+	Headers    map[string][]string `json:"headers,omitempty"`
+	RequestLog string              `json:"request_log,omitempty"`
+}
 
 // RequestLogger defines the interface for logging HTTP requests and responses.
 // It provides methods for logging both regular and streaming HTTP request/response cycles.
@@ -148,6 +165,8 @@ type FileRequestLogger struct {
 
 	// errorLogsMaxFiles limits the number of error log files retained.
 	errorLogsMaxFiles int
+
+	homeEnabled bool
 }
 
 // NewFileRequestLogger creates a new file-based request logger.
@@ -161,6 +180,39 @@ type FileRequestLogger struct {
 //
 // Returns:
 //   - *FileRequestLogger: A new file-based request logger instance
+func cloneHeaders(headers map[string][]string) map[string][]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(headers))
+	for key, values := range headers {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
+}
+
+func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers map[string][]string, logText string) error {
+	if l == nil || !l.homeEnabled {
+		return nil
+	}
+	client := currentHomeRequestLogClient()
+	if client == nil || !client.HeartbeatOK() {
+		return nil
+	}
+	payload := homeRequestLogPayload{
+		Headers:    cloneHeaders(headers),
+		RequestLog: logText,
+	}
+	raw, errMarshal := json.Marshal(&payload)
+	if errMarshal != nil {
+		return errMarshal
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return client.RPushRequestLog(ctx, raw)
+}
+
 func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int) *FileRequestLogger {
 	// Resolve logsDir relative to the configuration file directory when it's not absolute.
 	if !filepath.IsAbs(logsDir) {
@@ -180,6 +232,13 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 //
 // Returns:
 //   - bool: True if logging is enabled, false otherwise
+func (l *FileRequestLogger) SetHomeEnabled(enabled bool) {
+	if l == nil {
+		return
+	}
+	l.homeEnabled = enabled
+}
+
 func (l *FileRequestLogger) IsEnabled() bool {
 	return l.enabled
 }
@@ -229,6 +288,15 @@ func (l *FileRequestLogger) LogRequestWithOptions(url, method string, requestHea
 func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
 	if !l.enabled && !force {
 		return nil
+	}
+
+	if l.homeEnabled && l.enabled {
+		responseSource := l.prepareHomeResponseLogSource(responseHeaders, response)
+		var buf bytes.Buffer
+		if errWrite := l.writeNonStreamingLog(&buf, url, method, requestHeaders, body, "", websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline, apiResponseErrors, statusCode, responseHeaders, responseSource, requestTimestamp, apiResponseTimestamp); errWrite != nil {
+			return fmt.Errorf("failed to build request log content: %w", errWrite)
+		}
+		return l.forwardRequestLogToHome(context.Background(), requestHeaders, buf.String())
 	}
 
 	// Ensure logs directory exists
@@ -321,6 +389,14 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (StreamingLogWriter, error) {
 	if !l.enabled {
 		return &NoOpStreamingLogWriter{}, nil
+	}
+
+	if l.homeEnabled {
+		client := currentHomeRequestLogClient()
+		if client == nil || !client.HeartbeatOK() {
+			return &NoOpStreamingLogWriter{}, nil
+		}
+		return newHomeStreamingLogWriter(url, method, headers, body), nil
 	}
 
 	// Ensure logs directory exists
@@ -570,6 +646,37 @@ func (l *FileRequestLogger) prepareResponseLogSource(responseHeaders map[string]
 
 	source.bodyPath = decompressedBodyPath
 	source.body = nil
+	return source
+}
+
+func (l *FileRequestLogger) prepareHomeResponseLogSource(responseHeaders map[string][]string, response []byte) *responseLogSource {
+	source := &responseLogSource{body: response}
+	if responseHeaders == nil || len(response) == 0 {
+		return source
+	}
+	contentEncoding := firstContentEncoding(responseHeaders)
+	if contentEncoding == "" {
+		return source
+	}
+	responseReader, errReader := l.newDecompressionReader(contentEncoding, response)
+	if errReader != nil {
+		source.decompressErr = errReader
+		return source
+	}
+	if responseReader == nil {
+		return source
+	}
+	defer func() {
+		if errClose := responseReader.Close(); errClose != nil {
+			log.WithError(errClose).Warn("failed to close home response decompression reader")
+		}
+	}()
+	var buf bytes.Buffer
+	if _, errCopy := io.Copy(&buf, responseReader); errCopy != nil {
+		source.decompressErr = errCopy
+		return source
+	}
+	source.body = buf.Bytes()
 	return source
 }
 
@@ -1480,6 +1587,147 @@ func (w *FileStreamingLogWriter) cleanupTempFiles() {
 		}
 		w.responseBodyPath = ""
 	}
+}
+
+type homeStreamingLogWriter struct {
+	url       string
+	method    string
+	timestamp time.Time
+
+	requestHeaders map[string][]string
+	requestBody    []byte
+	responseBody   bytes.Buffer
+	chunkChan      chan []byte
+	doneChan       chan struct{}
+
+	responseStatus   int
+	statusWritten    bool
+	responseHeaders  map[string][]string
+	apiRequest       []byte
+	apiResponse      []byte
+	apiWebsocketTime []byte
+	apiResponseTS    time.Time
+}
+
+func newHomeStreamingLogWriter(url, method string, headers map[string][]string, body []byte) *homeStreamingLogWriter {
+	writer := &homeStreamingLogWriter{
+		url:            url,
+		method:         method,
+		timestamp:      time.Now(),
+		requestHeaders: cloneHeaders(headers),
+		requestBody:    bytes.Clone(body),
+		chunkChan:      make(chan []byte, 100),
+		doneChan:       make(chan struct{}),
+	}
+	go writer.asyncWriter()
+	return writer
+}
+
+func (w *homeStreamingLogWriter) asyncWriter() {
+	defer close(w.doneChan)
+	for chunk := range w.chunkChan {
+		if len(chunk) == 0 {
+			continue
+		}
+		_, _ = w.responseBody.Write(chunk)
+	}
+}
+
+func (w *homeStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+	if w == nil || w.chunkChan == nil || len(chunk) == 0 {
+		return
+	}
+	chunkCopy := bytes.Clone(chunk)
+	select {
+	case w.chunkChan <- chunkCopy:
+	default:
+	}
+}
+
+func (w *homeStreamingLogWriter) WriteStatus(status int, headers map[string][]string) error {
+	if w == nil || status == 0 {
+		return nil
+	}
+	w.responseStatus = status
+	w.responseHeaders = cloneHeaders(headers)
+	w.statusWritten = true
+	return nil
+}
+
+func (w *homeStreamingLogWriter) WriteAPIRequest(apiRequest []byte) error {
+	if w == nil || len(apiRequest) == 0 {
+		return nil
+	}
+	w.apiRequest = bytes.Clone(apiRequest)
+	return nil
+}
+
+func (w *homeStreamingLogWriter) WriteAPIResponse(apiResponse []byte) error {
+	if w == nil || len(apiResponse) == 0 {
+		return nil
+	}
+	w.apiResponse = bytes.Clone(apiResponse)
+	return nil
+}
+
+func (w *homeStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline []byte) error {
+	if w == nil || len(apiWebsocketTimeline) == 0 {
+		return nil
+	}
+	w.apiWebsocketTime = bytes.Clone(apiWebsocketTimeline)
+	return nil
+}
+
+func (w *homeStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
+	if w == nil || timestamp.IsZero() {
+		return
+	}
+	w.apiResponseTS = timestamp
+}
+
+func (w *homeStreamingLogWriter) Close() error {
+	if w == nil {
+		return nil
+	}
+	if w.chunkChan != nil {
+		close(w.chunkChan)
+		w.chunkChan = nil
+	}
+	if w.doneChan != nil {
+		<-w.doneChan
+		w.doneChan = nil
+	}
+	client := currentHomeRequestLogClient()
+	if client == nil || !client.HeartbeatOK() {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	if errWrite := writeRequestInfoWithBody(&buf, w.url, w.method, w.requestHeaders, w.requestBody, "", w.timestamp, "http", inferUpstreamTransport(w.apiRequest, w.apiResponse, w.apiWebsocketTime, nil), true); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := writeAPISection(&buf, "=== API WEBSOCKET TIMELINE ===\n", "=== API WEBSOCKET TIMELINE", w.apiWebsocketTime, time.Time{}); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := writeAPISection(&buf, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := writeAPISection(&buf, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTS); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := writeResponseSection(&buf, w.responseStatus, w.statusWritten, w.responseHeaders, bytes.NewReader(w.responseBody.Bytes()), nil, false); errWrite != nil {
+		return errWrite
+	}
+
+	payload := homeRequestLogPayload{
+		Headers:    cloneHeaders(w.requestHeaders),
+		RequestLog: buf.String(),
+	}
+	raw, errMarshal := json.Marshal(&payload)
+	if errMarshal != nil {
+		return errMarshal
+	}
+	return client.RPushRequestLog(context.Background(), raw)
 }
 
 // NoOpStreamingLogWriter is a no-operation implementation for when logging is disabled.
