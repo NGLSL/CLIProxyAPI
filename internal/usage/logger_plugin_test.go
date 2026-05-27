@@ -39,10 +39,11 @@ func TestRequestStatisticsRecordIncludesLatency(t *testing.T) {
 func TestRequestStatisticsRecordIncludesFirstByteLatency(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(context.Background(), coreusage.Record{
-		APIKey:           "test-key",
-		Model:            "gpt-5.4",
-		RequestedAt:      time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC),
-		FirstByteLatency: 250 * time.Millisecond,
+		APIKey:              "test-key",
+		Model:               "gpt-5.4",
+		RequestedAt:         time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC),
+		FirstByteLatency:    250 * time.Millisecond,
+		APIFirstByteLatency: 100 * time.Millisecond,
 		Detail: coreusage.Detail{
 			InputTokens:  10,
 			OutputTokens: 20,
@@ -60,6 +61,12 @@ func TestRequestStatisticsRecordIncludesFirstByteLatency(t *testing.T) {
 	}
 	if *details[0].FirstByteLatencyMs != 250 {
 		t.Fatalf("first_byte_latency_ms = %d, want 250", *details[0].FirstByteLatencyMs)
+	}
+	if details[0].APIFirstByteLatencyMs == nil {
+		t.Fatal("api_first_byte_latency_ms = nil, want value")
+	}
+	if *details[0].APIFirstByteLatencyMs != 100 {
+		t.Fatalf("api_first_byte_latency_ms = %d, want 100", *details[0].APIFirstByteLatencyMs)
 	}
 }
 

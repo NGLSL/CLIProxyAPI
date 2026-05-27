@@ -16,9 +16,11 @@ import (
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/misc"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking"
+	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdkusage "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/NGLSL/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -605,6 +607,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
+			var completedUsage sdkusage.Detail
+			completedHasUsage := false
+			completedDataForImageUsage := []byte(nil)
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
@@ -622,21 +627,31 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed":
 					if detail, ok := helps.ParseCodexUsage(data); ok {
-						reporter.Publish(ctx, detail)
+						completedUsage = detail
+						completedHasUsage = true
 					}
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
-					publishCodexImageToolUsage(ctx, reporter, body, data)
+					completedDataForImageUsage = bytes.Clone(data)
 					translatedLine = append([]byte("data: "), data...)
 				}
 			}
 
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, translatedLine, &param)
 			for i := range chunks {
+				if len(chunks[i]) > 0 {
+					internalusage.ObserveResponseChunkReadyFromContext(ctx)
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
 					return
 				}
+			}
+			if completedHasUsage {
+				reporter.Publish(ctx, completedUsage)
+			}
+			if len(completedDataForImageUsage) > 0 {
+				publishCodexImageToolUsage(ctx, reporter, body, completedDataForImageUsage)
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {

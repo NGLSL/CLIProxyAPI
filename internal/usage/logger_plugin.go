@@ -94,18 +94,19 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp          time.Time  `json:"timestamp"`
-	LatencyMs          int64      `json:"latency_ms"`
-	FirstByteLatencyMs *int64     `json:"first_byte_latency_ms,omitempty"`
-	ChunkCount         int64      `json:"chunk_count"`
-	ResponseBytes      int64      `json:"response_bytes"`
-	APIResponseBytes   int64      `json:"api_response_bytes"`
-	Source             string     `json:"source"`
-	Alias              string     `json:"alias,omitempty"`
-	AuthIndex          string     `json:"auth_index"`
-	ReasoningEffort    string     `json:"reasoning_effort,omitempty"`
-	Tokens             TokenStats `json:"tokens"`
-	Failed             bool       `json:"failed"`
+	Timestamp             time.Time  `json:"timestamp"`
+	LatencyMs             int64      `json:"latency_ms"`
+	FirstByteLatencyMs    *int64     `json:"first_byte_latency_ms,omitempty"`
+	APIFirstByteLatencyMs *int64     `json:"api_first_byte_latency_ms,omitempty"`
+	ChunkCount            int64      `json:"chunk_count"`
+	ResponseBytes         int64      `json:"response_bytes"`
+	APIResponseBytes      int64      `json:"api_response_bytes"`
+	Source                string     `json:"source"`
+	Alias                 string     `json:"alias,omitempty"`
+	AuthIndex             string     `json:"auth_index"`
+	ReasoningEffort       string     `json:"reasoning_effort,omitempty"`
+	Tokens                TokenStats `json:"tokens"`
+	Failed                bool       `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -233,18 +234,19 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.apis[statsKey] = stats
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp:          timestamp,
-		LatencyMs:          normaliseLatency(record.Latency),
-		FirstByteLatencyMs: normaliseOptionalLatency(record.FirstByteLatency),
-		ChunkCount:         normaliseNonNegative(record.ChunkCount),
-		ResponseBytes:      normaliseNonNegative(record.ResponseBytes),
-		APIResponseBytes:   normaliseNonNegative(record.APIResponseBytes),
-		Source:             record.Source,
-		Alias:              strings.TrimSpace(record.Alias),
-		AuthIndex:          record.AuthIndex,
-		ReasoningEffort:    strings.TrimSpace(record.ReasoningEffort),
-		Tokens:             detail,
-		Failed:             failed,
+		Timestamp:             timestamp,
+		LatencyMs:             normaliseLatency(record.Latency),
+		FirstByteLatencyMs:    normaliseOptionalLatency(record.FirstByteLatency),
+		APIFirstByteLatencyMs: normaliseOptionalLatency(record.APIFirstByteLatency),
+		ChunkCount:            normaliseNonNegative(record.ChunkCount),
+		ResponseBytes:         normaliseNonNegative(record.ResponseBytes),
+		APIResponseBytes:      normaliseNonNegative(record.APIResponseBytes),
+		Source:                record.Source,
+		Alias:                 strings.TrimSpace(record.Alias),
+		AuthIndex:             record.AuthIndex,
+		ReasoningEffort:       strings.TrimSpace(record.ReasoningEffort),
+		Tokens:                detail,
+		Failed:                failed,
 	})
 
 	s.requestsByDay[dayKey]++
@@ -784,19 +786,42 @@ func normaliseNonNegative(value int64) int64 {
 const requestMetricsContextKey = "USAGE_REQUEST_METRICS"
 
 type RequestMetrics struct {
-	ChunkCount       int64
-	ResponseBytes    int64
-	APIResponseBytes int64
+	ChunkCount           int64
+	ResponseBytes        int64
+	APIResponseBytes     int64
+	FirstResponseChunkAt time.Time
+	FirstResponseWriteAt time.Time
 }
 
 type requestMetricsState struct {
-	chunkCount       atomic.Int64
-	responseBytes    atomic.Int64
-	apiResponseBytes atomic.Int64
+	chunkCount                 atomic.Int64
+	responseBytes              atomic.Int64
+	apiResponseBytes           atomic.Int64
+	firstResponseChunkUnixNano atomic.Int64
+	firstResponseWriteUnixNano atomic.Int64
 }
 
 func EnsureRequestMetrics(ginCtx *gin.Context) {
 	_ = requestMetricsStateFromGin(ginCtx)
+}
+
+func ObserveResponseChunkReadyFromContext(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return
+	}
+	ObserveResponseChunkReady(ginCtx)
+}
+
+func ObserveResponseChunkReady(ginCtx *gin.Context) {
+	if ginCtx == nil {
+		return
+	}
+	state := requestMetricsStateFromGin(ginCtx)
+	state.firstResponseChunkUnixNano.CompareAndSwap(0, time.Now().UnixNano())
 }
 
 func ObserveResponseWrite(ginCtx *gin.Context, bytesWritten int64, streaming bool) {
@@ -805,6 +830,7 @@ func ObserveResponseWrite(ginCtx *gin.Context, bytesWritten int64, streaming boo
 	}
 	state := requestMetricsStateFromGin(ginCtx)
 	state.responseBytes.Add(bytesWritten)
+	state.firstResponseWriteUnixNano.CompareAndSwap(0, time.Now().UnixNano())
 	if streaming {
 		state.chunkCount.Add(1)
 	}
@@ -834,11 +860,18 @@ func SnapshotRequestMetricsFromGin(ginCtx *gin.Context) RequestMetrics {
 	if state == nil {
 		return RequestMetrics{}
 	}
-	return RequestMetrics{
+	metrics := RequestMetrics{
 		ChunkCount:       state.chunkCount.Load(),
 		ResponseBytes:    state.responseBytes.Load(),
 		APIResponseBytes: state.apiResponseBytes.Load(),
 	}
+	if firstChunkUnixNano := state.firstResponseChunkUnixNano.Load(); firstChunkUnixNano > 0 {
+		metrics.FirstResponseChunkAt = time.Unix(0, firstChunkUnixNano)
+	}
+	if firstWriteUnixNano := state.firstResponseWriteUnixNano.Load(); firstWriteUnixNano > 0 {
+		metrics.FirstResponseWriteAt = time.Unix(0, firstWriteUnixNano)
+	}
+	return metrics
 }
 
 func requestMetricsStateFromGin(ginCtx *gin.Context) *requestMetricsState {

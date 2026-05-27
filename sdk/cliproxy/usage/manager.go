@@ -12,22 +12,23 @@ import (
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider         string
-	Model            string
-	Alias            string
-	APIKey           string
-	AuthID           string
-	AuthIndex        string
-	Source           string
-	ReasoningEffort  string
-	RequestedAt      time.Time
-	Latency          time.Duration
-	FirstByteLatency time.Duration
-	Failed           bool
-	ChunkCount       int64
-	ResponseBytes    int64
-	APIResponseBytes int64
-	Detail           Detail
+	Provider            string
+	Model               string
+	Alias               string
+	APIKey              string
+	AuthID              string
+	AuthIndex           string
+	Source              string
+	ReasoningEffort     string
+	RequestedAt         time.Time
+	Latency             time.Duration
+	FirstByteLatency    time.Duration
+	APIFirstByteLatency time.Duration
+	Failed              bool
+	ChunkCount          int64
+	ResponseBytes       int64
+	APIResponseBytes    int64
+	Detail              Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }

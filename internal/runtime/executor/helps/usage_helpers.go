@@ -126,24 +126,30 @@ func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, d
 		return usage.Record{Model: model, Detail: detail, Failed: failed}
 	}
 	metrics := internalusage.SnapshotRequestMetrics(ctx)
+	apiFirstByteLatency := r.apiFirstByteLatency(ctx)
+	firstByteLatency := r.clientFirstByteLatency(metrics)
+	if firstByteLatency == 0 {
+		firstByteLatency = apiFirstByteLatency
+	}
 	return usage.Record{
-		Provider:         r.provider,
-		Model:            model,
-		Alias:            r.alias,
-		Source:           r.source,
-		APIKey:           r.apiKey,
-		AuthID:           r.authID,
-		AuthIndex:        r.authIndex,
-		ReasoningEffort:  r.reasoning,
-		RequestedAt:      r.requestedAt,
-		Latency:          r.latency(),
-		FirstByteLatency: r.firstByteLatency(ctx),
-		Failed:           failed,
-		ChunkCount:       metrics.ChunkCount,
-		ResponseBytes:    metrics.ResponseBytes,
-		APIResponseBytes: metrics.APIResponseBytes,
-		Detail:           detail,
-		ResponseHeaders:  internallogging.GetResponseHeaders(ctx),
+		Provider:            r.provider,
+		Model:               model,
+		Alias:               r.alias,
+		Source:              r.source,
+		APIKey:              r.apiKey,
+		AuthID:              r.authID,
+		AuthIndex:           r.authIndex,
+		ReasoningEffort:     r.reasoning,
+		RequestedAt:         r.requestedAt,
+		Latency:             r.latency(),
+		FirstByteLatency:    firstByteLatency,
+		APIFirstByteLatency: apiFirstByteLatency,
+		Failed:              failed,
+		ChunkCount:          metrics.ChunkCount,
+		ResponseBytes:       metrics.ResponseBytes,
+		APIResponseBytes:    metrics.APIResponseBytes,
+		Detail:              detail,
+		ResponseHeaders:     internallogging.GetResponseHeaders(ctx),
 	}
 }
 
@@ -158,7 +164,7 @@ func (r *UsageReporter) latency() time.Duration {
 	return latency
 }
 
-func (r *UsageReporter) firstByteLatency(ctx context.Context) time.Duration {
+func (r *UsageReporter) apiFirstByteLatency(ctx context.Context) time.Duration {
 	if r == nil || r.requestedAt.IsZero() {
 		return 0
 	}
@@ -167,6 +173,24 @@ func (r *UsageReporter) firstByteLatency(ctx context.Context) time.Duration {
 		return 0
 	}
 	latency := responseTimestamp.Sub(r.requestedAt)
+	if latency <= 0 {
+		return 0
+	}
+	return latency
+}
+
+func (r *UsageReporter) clientFirstByteLatency(metrics internalusage.RequestMetrics) time.Duration {
+	if r == nil || r.requestedAt.IsZero() {
+		return 0
+	}
+	firstResponseAt := metrics.FirstResponseWriteAt
+	if firstResponseAt.IsZero() {
+		firstResponseAt = metrics.FirstResponseChunkAt
+	}
+	if firstResponseAt.IsZero() {
+		return 0
+	}
+	latency := firstResponseAt.Sub(r.requestedAt)
 	if latency <= 0 {
 		return 0
 	}

@@ -19,9 +19,11 @@ import (
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/misc"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking"
+	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
 	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdkusage "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/NGLSL/CLIProxyAPI/v6/sdk/proxyutil"
 	sdktranslator "github.com/NGLSL/CLIProxyAPI/v6/sdk/translator"
 	"github.com/gin-gonic/gin"
@@ -620,15 +622,21 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			payload = normalizeCodexWebsocketCompletion(payload)
 			eventType := gjson.GetBytes(payload, "type").String()
+			var completedUsage sdkusage.Detail
+			completedHasUsage := false
 			if eventType == "response.completed" || eventType == "response.done" {
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
-					reporter.Publish(ctx, detail)
+					completedUsage = detail
+					completedHasUsage = true
 				}
 			}
 
 			line := encodeCodexWebsocketAsSSE(payload)
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, body, body, line, &param)
 			for i := range chunks {
+				if len(chunks[i]) > 0 {
+					internalusage.ObserveResponseChunkReadyFromContext(ctx)
+				}
 				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 					terminateReason = "context_done"
 					terminateErr = ctx.Err()
@@ -636,6 +644,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 			}
 			if eventType == "response.completed" || eventType == "response.done" {
+				if completedHasUsage {
+					reporter.Publish(ctx, completedUsage)
+				}
 				return
 			}
 		}

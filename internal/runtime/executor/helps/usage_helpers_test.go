@@ -199,6 +199,9 @@ func TestUsageReporterBuildRecordIncludesFirstByteLatency(t *testing.T) {
 	if record.FirstByteLatency != 250*time.Millisecond {
 		t.Fatalf("first byte latency = %v, want 250ms", record.FirstByteLatency)
 	}
+	if record.APIFirstByteLatency != 250*time.Millisecond {
+		t.Fatalf("api first byte latency = %v, want 250ms", record.APIFirstByteLatency)
+	}
 }
 
 func TestUsageReporterBuildRecordPrefersAttemptFirstByteLatency(t *testing.T) {
@@ -222,6 +225,9 @@ func TestUsageReporterBuildRecordPrefersAttemptFirstByteLatency(t *testing.T) {
 	record := reporter.buildRecord(ctx, coreusage.Detail{TotalTokens: 3}, false)
 	if record.FirstByteLatency != 250*time.Millisecond {
 		t.Fatalf("first byte latency = %v, want 250ms", record.FirstByteLatency)
+	}
+	if record.APIFirstByteLatency != 250*time.Millisecond {
+		t.Fatalf("api first byte latency = %v, want 250ms", record.APIFirstByteLatency)
 	}
 }
 
@@ -266,6 +272,9 @@ func TestUsageReporterBuildRecordIncludesRequestMetrics(t *testing.T) {
 	}
 
 	record := reporter.buildRecord(ctx, coreusage.Detail{TotalTokens: 3}, false)
+	if record.FirstByteLatency <= 0 {
+		t.Fatalf("first byte latency = %v, want positive client write latency", record.FirstByteLatency)
+	}
 	if record.ChunkCount != 2 {
 		t.Fatalf("chunk count = %d, want 2", record.ChunkCount)
 	}
