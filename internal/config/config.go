@@ -431,14 +431,7 @@ func (m ClaudeModel) GetAlias() string { return m.Alias }
 // including the API key itself and an optional base URL for the API endpoint.
 type CodexKey struct {
 	// APIKey is the authentication key for accessing Codex API services.
-	// Deprecated: use APIKeyEntries for multiple credentials that share one
-	// Codex endpoint/config block. This field is kept so existing config files
-	// continue to load without migration.
 	APIKey string `yaml:"api-key" json:"api-key"`
-
-	// Name is an optional display name for distinguishing Codex config blocks.
-	// 它只用于配置管理和展示，不参与上游鉴权、模型路由或 Auth ID 生成。
-	Name string `yaml:"name,omitempty" json:"name,omitempty"`
 
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
@@ -455,14 +448,7 @@ type CodexKey struct {
 	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
-	// Deprecated for multi-key Codex entries: use APIKeyEntries[].ProxyURL for
-	// per-key proxy overrides. This remains the fallback proxy for legacy single-key entries.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
-
-	// APIKeyEntries defines one or more Codex API keys under the same endpoint,
-	// model aliases, headers, prefix, websocket mode, and excluded-model rules.
-	// 每个 entry 会展开成独立 Auth，因此调度、冷却和失败切换仍然按密钥隔离。
-	APIKeyEntries []CodexAPIKeyEntry `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
 	// Models defines upstream model names and aliases for request routing.
 	Models []CodexModel `yaml:"models" json:"models"`
@@ -472,127 +458,54 @@ type CodexKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
+	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
 func (k CodexKey) GetBaseURL() string { return k.BaseURL }
 
-// EffectiveAPIKeyEntries returns the credential list that should be expanded
-// into runtime Auth records. api-key-entries is the new preferred format; the
-// legacy top-level api-key is only used when no non-empty entry exists.
-func (k CodexKey) EffectiveAPIKeyEntries() []CodexAPIKeyEntry {
-	entries := make([]CodexAPIKeyEntry, 0, len(k.APIKeyEntries))
-	for i := range k.APIKeyEntries {
-		entry := k.APIKeyEntries[i]
-		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-		entry.Headers = NormalizeHeaders(entry.Headers)
-		if entry.APIKey == "" {
-			continue
-		}
-		entries = append(entries, entry)
-	}
-	if len(entries) > 0 {
-		return entries
-	}
-
-	legacyKey := strings.TrimSpace(k.APIKey)
-	if legacyKey == "" {
-		return nil
-	}
-	return []CodexAPIKeyEntry{{
-		APIKey:   legacyKey,
-		ProxyURL: strings.TrimSpace(k.ProxyURL),
-	}}
-}
-
-// EffectiveProxyURLForEntry resolves the proxy used by one expanded Codex key.
-// entry.proxy-url has priority; the legacy/provider proxy-url remains a fallback
-// so old single-key configs and grouped multi-key configs can share one proxy.
-func (k CodexKey) EffectiveProxyURLForEntry(entry CodexAPIKeyEntry) string {
-	if proxyURL := strings.TrimSpace(entry.ProxyURL); proxyURL != "" {
-		return proxyURL
-	}
-	return strings.TrimSpace(k.ProxyURL)
-}
-
 // ResolveCodexKey finds the Codex config block that owns the supplied runtime
-// credential. It understands both legacy top-level api-key and the nested
-// api-key-entries shape, so callers can resolve model aliases and headers
-// without caring which YAML format produced the Auth.
+// credential by matching APIKey and BaseURL directly.
 func (cfg *Config) ResolveCodexKey(apiKey, baseURL string) *CodexKey {
-	entry, _ := cfg.ResolveCodexKeyEntry(apiKey, baseURL)
-	return entry
-}
-
-// ResolveCodexKeyEntry returns both the owning Codex config block and the
-// matched expanded key entry. The returned entry is a normalized copy because
-// legacy top-level api-key values are converted into an entry on the fly.
-func (cfg *Config) ResolveCodexKeyEntry(apiKey, baseURL string) (*CodexKey, CodexAPIKeyEntry) {
 	if cfg == nil {
-		return nil, CodexAPIKeyEntry{}
+		return nil
 	}
 	attrKey := strings.TrimSpace(apiKey)
 	attrBase := strings.TrimSpace(baseURL)
 	for i := range cfg.CodexKey {
 		candidate := &cfg.CodexKey[i]
+		cfgKey := strings.TrimSpace(candidate.APIKey)
 		cfgBase := strings.TrimSpace(candidate.BaseURL)
-		for _, entry := range candidate.EffectiveAPIKeyEntries() {
-			cfgKey := strings.TrimSpace(entry.APIKey)
-			if attrKey != "" && attrBase != "" {
-				if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-					return candidate, entry
-				}
-				continue
+		// Exact match on both APIKey and BaseURL
+		if attrKey != "" && attrBase != "" {
+			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
+				return candidate
 			}
-			if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-				if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-					return candidate, entry
-				}
-			}
-			if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-				return candidate, entry
+			continue
+		}
+		// Match by APIKey only, BaseURL is wildcard or unset
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return candidate
 			}
 		}
+		// Match by BaseURL only when APIKey is empty
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return candidate
+		}
 	}
+	// Fallback: match by APIKey only (loose)
 	if attrKey != "" {
 		for i := range cfg.CodexKey {
 			candidate := &cfg.CodexKey[i]
-			for _, entry := range candidate.EffectiveAPIKeyEntries() {
-				if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-					return candidate, entry
-				}
+			if strings.EqualFold(strings.TrimSpace(candidate.APIKey), attrKey) {
+				return candidate
 			}
 		}
 	}
-	return nil, CodexAPIKeyEntry{}
-}
-
-// CountCodexAPIKeyEntries counts runtime Codex credentials, not just YAML
-// provider blocks. This keeps reload logs and management summaries aligned with
-// the Auth records actually created by the synthesizer.
-func (cfg *Config) CountCodexAPIKeyEntries() int {
-	if cfg == nil || len(cfg.CodexKey) == 0 {
-		return 0
-	}
-	count := 0
-	for i := range cfg.CodexKey {
-		count += len(cfg.CodexKey[i].EffectiveAPIKeyEntries())
-	}
-	return count
-}
-
-// CodexAPIKeyEntry represents one Codex credential in a provider-style config block.
-type CodexAPIKeyEntry struct {
-	// APIKey is the credential sent as the upstream bearer token.
-	APIKey string `yaml:"api-key" json:"api-key"`
-
-	// ProxyURL overrides the global/provider proxy only for this specific key.
-	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
-
-	// Headers optionally adds extra HTTP headers only for this specific key.
-	// 这些请求头会和外层 CodexKey.Headers 合并，Authorization 始终由实际 API key 覆盖。
-	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	return nil
 }
 
 // CodexModel describes a mapping between an alias and the actual upstream model name.
@@ -1038,37 +951,11 @@ func (cfg *Config) SanitizeCodexKeys() {
 	out := make([]CodexKey, 0, len(cfg.CodexKey))
 	for i := range cfg.CodexKey {
 		e := cfg.CodexKey[i]
-		e.APIKey = strings.TrimSpace(e.APIKey)
-		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
-		e.ProxyURL = strings.TrimSpace(e.ProxyURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
-			continue
-		}
-		if len(e.APIKeyEntries) > 0 {
-			entries := make([]CodexAPIKeyEntry, 0, len(e.APIKeyEntries))
-			seen := make(map[string]struct{}, len(e.APIKeyEntries))
-			for j := range e.APIKeyEntries {
-				keyEntry := e.APIKeyEntries[j]
-				keyEntry.APIKey = strings.TrimSpace(keyEntry.APIKey)
-				keyEntry.ProxyURL = strings.TrimSpace(keyEntry.ProxyURL)
-				keyEntry.Headers = NormalizeHeaders(keyEntry.Headers)
-				if keyEntry.APIKey == "" {
-					continue
-				}
-				uniqueKey := keyEntry.APIKey + "|" + e.BaseURL + "|" + keyEntry.ProxyURL
-				if _, exists := seen[uniqueKey]; exists {
-					continue
-				}
-				seen[uniqueKey] = struct{}{}
-				entries = append(entries, keyEntry)
-			}
-			e.APIKeyEntries = entries
-		}
-		if e.APIKey == "" && len(e.APIKeyEntries) == 0 {
 			continue
 		}
 		out = append(out, e)

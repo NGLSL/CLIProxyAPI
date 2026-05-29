@@ -391,16 +391,14 @@ func TestDeleteCodexKey_RequiresIndexWhenAPIKeyAndBaseURLDuplicated(t *testing.T
 		cfg: &config.Config{
 			CodexKey: []config.CodexKey{
 				{
-					BaseURL: "https://codex.example.com",
-					APIKeyEntries: []config.CodexAPIKeyEntry{
-						{APIKey: "shared-key", ProxyURL: "http://proxy-a.example.com:8080"},
-					},
+					APIKey:   "shared-key",
+					BaseURL:  "https://codex.example.com",
+					ProxyURL: "http://proxy-a.example.com:8080",
 				},
 				{
-					BaseURL: "https://codex.example.com",
-					APIKeyEntries: []config.CodexAPIKeyEntry{
-						{APIKey: "shared-key", ProxyURL: "http://proxy-b.example.com:8080"},
-					},
+					APIKey:   "shared-key",
+					BaseURL:  "https://codex.example.com",
+					ProxyURL: "http://proxy-b.example.com:8080",
 				},
 			},
 		},
@@ -429,16 +427,14 @@ func TestDeleteCodexKey_DeletesDuplicateByIndex(t *testing.T) {
 		cfg: &config.Config{
 			CodexKey: []config.CodexKey{
 				{
-					BaseURL: "https://codex.example.com",
-					APIKeyEntries: []config.CodexAPIKeyEntry{
-						{APIKey: "shared-key", ProxyURL: "http://proxy-a.example.com:8080"},
-					},
+					APIKey:   "shared-key",
+					BaseURL:  "https://codex.example.com",
+					ProxyURL: "http://proxy-a.example.com:8080",
 				},
 				{
-					BaseURL: "https://codex.example.com",
-					APIKeyEntries: []config.CodexAPIKeyEntry{
-						{APIKey: "shared-key", ProxyURL: "http://proxy-b.example.com:8080"},
-					},
+					APIKey:   "shared-key",
+					BaseURL:  "https://codex.example.com",
+					ProxyURL: "http://proxy-b.example.com:8080",
 				},
 			},
 		},
@@ -457,7 +453,7 @@ func TestDeleteCodexKey_DeletesDuplicateByIndex(t *testing.T) {
 	if got := len(h.cfg.CodexKey); got != 1 {
 		t.Fatalf("codex keys len = %d, want 1", got)
 	}
-	if got := h.cfg.CodexKey[0].APIKeyEntries[0].ProxyURL; got != "http://proxy-a.example.com:8080" {
+	if got := h.cfg.CodexKey[0].ProxyURL; got != "http://proxy-a.example.com:8080" {
 		t.Fatalf("remaining proxy-url = %q, want %q", got, "http://proxy-a.example.com:8080")
 	}
 }

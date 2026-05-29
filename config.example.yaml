@@ -175,14 +175,10 @@ nonstream-keepalive-interval: 0
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
-#   - base-url: "https://www.example.com"
-#     prefix: "team" # optional: shared prefix for all keys in this block
-#     headers:
-#       X-Custom-Header: "shared-value"
-#     api-key-entries:
-#       - api-key: "sk-atSM...01"
-#         proxy-url: "socks5://proxy-a.example.com:1080" # optional: per-key proxy override
-#       - api-key: "sk-atSM...02"
+#     disable-cooling: true # optional: disable cooldown scheduling for this credential
+#   - api-key: "sk-atSM...02"
+#     base-url: "https://www.example.com"
+#     prefix: "team"
 #     models:
 #       - name: "gpt-5-codex"
 #         alias: "team-codex"

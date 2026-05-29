@@ -773,23 +773,23 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 			return strings.TrimSpace(entry.ProxyURL)
 		}
 	case "codex":
-		if entry, keyEntry := resolveCodexAPIKeyEntry(cfg, auth); entry != nil {
-			return entry.EffectiveProxyURLForEntry(keyEntry)
+		if entry := resolveCodexAPIKey(cfg, auth); entry != nil {
+			return strings.TrimSpace(entry.ProxyURL)
 		}
 	}
 	return ""
 }
 
-func resolveCodexAPIKeyEntry(cfg *config.Config, auth *coreauth.Auth) (*config.CodexKey, config.CodexAPIKeyEntry) {
+func resolveCodexAPIKey(cfg *config.Config, auth *coreauth.Auth) *config.CodexKey {
 	if cfg == nil || auth == nil {
-		return nil, config.CodexAPIKeyEntry{}
+		return nil
 	}
 	var apiKey, baseURL string
 	if auth.Attributes != nil {
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	return cfg.ResolveCodexKeyEntry(apiKey, baseURL)
+	return cfg.ResolveCodexKey(apiKey, baseURL)
 }
 
 func resolveOpenAICompatAPIKeyProxyURL(cfg *config.Config, auth *coreauth.Auth, apiKey, providerKey, compatName string) string {

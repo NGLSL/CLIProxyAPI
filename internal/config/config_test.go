@@ -130,15 +130,14 @@ func TestLoadConfigOptionalRoutingSourcePreference(t *testing.T) {
 	}
 }
 
-func TestLoadConfigOptionalCodexKeyName(t *testing.T) {
+func TestLoadConfigOptionalCodexKey(t *testing.T) {
 	t.Parallel()
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	content := `codex-api-key:
-  - name: " Primary Codex "
+  - api-key: "codex-key"
     base-url: "https://codex.example.com"
-    api-key-entries:
-      - api-key: "codex-key"
+    disable-cooling: true
 `
 	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -151,8 +150,11 @@ func TestLoadConfigOptionalCodexKeyName(t *testing.T) {
 	if got := len(cfg.CodexKey); got != 1 {
 		t.Fatalf("CodexKey len = %d, want 1", got)
 	}
-	if got := cfg.CodexKey[0].Name; got != "Primary Codex" {
-		t.Fatalf("CodexKey[0].Name = %q, want %q", got, "Primary Codex")
+	if got := cfg.CodexKey[0].APIKey; got != "codex-key" {
+		t.Fatalf("CodexKey[0].APIKey = %q, want %q", got, "codex-key")
+	}
+	if !cfg.CodexKey[0].DisableCooling {
+		t.Fatalf("CodexKey[0].DisableCooling = false, want true")
 	}
 }
 

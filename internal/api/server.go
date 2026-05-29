@@ -1404,7 +1404,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 	geminiAPIKeyCount := len(cfg.GeminiKey)
 	claudeAPIKeyCount := len(cfg.ClaudeKey)
-	codexAPIKeyCount := cfg.CountCodexAPIKeyEntries()
+	codexAPIKeyCount := len(cfg.CodexKey)
 	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
 	openAICompatCount := 0
 	for i := range cfg.OpenAICompatibility {

@@ -945,7 +945,7 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 		if entry.BaseURL == "" {
 			continue
 		}
-		if entry.APIKey == "" && len(entry.APIKeyEntries) == 0 {
+		if entry.APIKey == "" {
 			continue
 		}
 		filtered = append(filtered, entry)
@@ -958,15 +958,13 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		APIKey         *string                    `json:"api-key"`
-		APIKeyEntries  *[]config.CodexAPIKeyEntry `json:"api-key-entries"`
-		Name           *string                    `json:"name"`
-		Prefix         *string                    `json:"prefix"`
-		BaseURL        *string                    `json:"base-url"`
-		ProxyURL       *string                    `json:"proxy-url"`
-		Models         *[]config.CodexModel       `json:"models"`
-		Headers        *map[string]string         `json:"headers"`
-		ExcludedModels *[]string                  `json:"excluded-models"`
+		APIKey         *string              `json:"api-key"`
+		Prefix         *string              `json:"prefix"`
+		BaseURL        *string              `json:"base-url"`
+		ProxyURL       *string              `json:"proxy-url"`
+		Models         *[]config.CodexModel `json:"models"`
+		Headers        *map[string]string   `json:"headers"`
+		ExcludedModels *[]string            `json:"excluded-models"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1001,12 +999,6 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	entry := h.cfg.CodexKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
-	}
-	if body.Value.APIKeyEntries != nil {
-		entry.APIKeyEntries = append([]config.CodexAPIKeyEntry(nil), (*body.Value.APIKeyEntries)...)
-	}
-	if body.Value.Name != nil {
-		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -1108,12 +1100,7 @@ func codexKeyContainsAPIKey(entry config.CodexKey, apiKey string) bool {
 	if apiKey == "" {
 		return false
 	}
-	for _, keyEntry := range entry.EffectiveAPIKeyEntries() {
-		if strings.TrimSpace(keyEntry.APIKey) == apiKey {
-			return true
-		}
-	}
-	return false
+	return strings.TrimSpace(entry.APIKey) == apiKey
 }
 
 func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
@@ -1179,32 +1166,11 @@ func normalizeCodexKey(entry *config.CodexKey) {
 		return
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
-	entry.Name = strings.TrimSpace(entry.Name)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
-	if len(entry.APIKeyEntries) > 0 {
-		normalizedEntries := make([]config.CodexAPIKeyEntry, 0, len(entry.APIKeyEntries))
-		seen := make(map[string]struct{}, len(entry.APIKeyEntries))
-		for i := range entry.APIKeyEntries {
-			keyEntry := entry.APIKeyEntries[i]
-			keyEntry.APIKey = strings.TrimSpace(keyEntry.APIKey)
-			keyEntry.ProxyURL = strings.TrimSpace(keyEntry.ProxyURL)
-			keyEntry.Headers = config.NormalizeHeaders(keyEntry.Headers)
-			if keyEntry.APIKey == "" {
-				continue
-			}
-			uniqueKey := keyEntry.APIKey + "|" + keyEntry.ProxyURL
-			if _, exists := seen[uniqueKey]; exists {
-				continue
-			}
-			seen[uniqueKey] = struct{}{}
-			normalizedEntries = append(normalizedEntries, keyEntry)
-		}
-		entry.APIKeyEntries = normalizedEntries
-	}
 	if len(entry.Models) == 0 {
 		return
 	}
