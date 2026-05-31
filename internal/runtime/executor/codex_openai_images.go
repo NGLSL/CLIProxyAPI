@@ -35,6 +35,7 @@ const (
 
 type codexOpenAIImagePreparedRequest struct {
 	Body           []byte
+	Tool           []byte
 	ResponseFormat string
 	StreamPrefix   string
 }
@@ -77,7 +78,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), codexOpenAIImagesMainModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, req, opts)
+	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, prepared.Tool, req, opts)
 	if errBuild != nil {
 		return resp, errBuild
 	}
@@ -164,7 +165,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), codexOpenAIImagesMainModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, req, opts)
+	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, prepared.Tool, req, opts)
 	if errBuild != nil {
 		return nil, errBuild
 	}
@@ -277,7 +278,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
-func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]byte, error) {
+func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, toolJSON []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]byte, error) {
 	out := body
 	var errThinking error
 	out, errThinking = thinking.ApplyThinking(out, codexOpenAIImagesMainModel, codexOpenAIImageSourceFormat, "codex", e.Identifier())
@@ -294,6 +295,7 @@ func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, req cliproxyexe
 	out, _ = sjson.DeleteBytes(out, "prompt_cache_retention")
 	out, _ = sjson.DeleteBytes(out, "safety_identifier")
 	out, _ = sjson.DeleteBytes(out, "stream_options")
+	out = ensureCodexOpenAIImageTool(out, toolJSON)
 	return normalizeCodexInstructions(out), nil
 }
 
@@ -343,6 +345,7 @@ func codexPrepareOpenAIImageGenerationJSON(rawJSON []byte, routeModel string) (c
 	body := codexBuildImagesResponsesRequest(prompt, nil, tool)
 	return codexOpenAIImagePreparedRequest{
 		Body:           body,
+		Tool:           tool,
 		ResponseFormat: codexOpenAIImageResponseFormatFromJSON(rawJSON),
 		StreamPrefix:   "image_generation",
 	}, nil
@@ -369,6 +372,7 @@ func codexPrepareOpenAIImageEditJSON(rawJSON []byte, routeModel string) (codexOp
 	body := codexBuildImagesResponsesRequest(prompt, images, tool)
 	return codexOpenAIImagePreparedRequest{
 		Body:           body,
+		Tool:           tool,
 		ResponseFormat: codexOpenAIImageResponseFormatFromJSON(rawJSON),
 		StreamPrefix:   "image_edit",
 	}, nil
@@ -430,6 +434,7 @@ func codexPrepareOpenAIImageEditMultipart(rawBody []byte, routeModel string, con
 	body := codexBuildImagesResponsesRequest(prompt, images, tool)
 	return codexOpenAIImagePreparedRequest{
 		Body:           body,
+		Tool:           tool,
 		ResponseFormat: responseFormat,
 		StreamPrefix:   "image_edit",
 	}, nil
@@ -504,6 +509,25 @@ func codexBuildImagesResponsesRequest(prompt string, images []string, toolJSON [
 		req, _ = sjson.SetRawBytes(req, "tools.-1", toolJSON)
 	}
 	return req
+}
+
+func ensureCodexOpenAIImageTool(body []byte, toolJSON []byte) []byte {
+	if len(toolJSON) == 0 || !json.Valid(toolJSON) {
+		return body
+	}
+	body, _ = sjson.SetRawBytes(body, "tool_choice", []byte(`{"type":"image_generation"}`))
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		body, _ = sjson.SetRawBytes(body, "tools", []byte(`[]`))
+		tools = gjson.GetBytes(body, "tools")
+	}
+	for _, tool := range tools.Array() {
+		if strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), "image_generation") {
+			return body
+		}
+	}
+	body, _ = sjson.SetRawBytes(body, "tools.-1", toolJSON)
+	return body
 }
 
 func codexFormValue(form *multipart.Form, key string) string {
