@@ -115,6 +115,12 @@ routing:
   source-preference: "none" # none (default), api-first, file-first
   sticky-ttl: 1800 # Sticky binding TTL in seconds for sticky-round-robin
 
+# Codex provider behavior.
+codex:
+  # When true and routing.strategy is fill-first or sticky-round-robin, remap Codex
+  # prompt_cache_key, installation identity, turn IDs, and window IDs per selected auth.
+  identity-confuse: false
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 

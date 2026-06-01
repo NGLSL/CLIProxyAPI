@@ -25,6 +25,7 @@ import (
 	coreusage "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/sjson"
 )
 
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
@@ -1649,7 +1650,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth = preparedAuth
 		}
 		metadataBefore, metadataBeforeOK := authMetadataFingerprint(auth.Metadata)
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, models, pooled)
+		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, models, pooled)
 		m.persistAuthMetadataChanges(execCtx, auth, metadataBefore, metadataBeforeOK)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
@@ -1669,6 +1671,18 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		return streamResult, nil
 	}
+}
+
+func sanitizeDownstreamWebsocketFallbackRequest(ctx context.Context, auth *Auth, req cliproxyexecutor.Request) cliproxyexecutor.Request {
+	if !cliproxyexecutor.DownstreamWebsocket(ctx) || authWebsocketsEnabled(auth) || len(req.Payload) == 0 {
+		return req
+	}
+	updated, errDelete := sjson.DeleteBytes(req.Payload, "generate")
+	if errDelete != nil {
+		return req
+	}
+	req.Payload = updated
+	return req
 }
 
 func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {

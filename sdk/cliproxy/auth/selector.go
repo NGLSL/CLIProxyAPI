@@ -456,6 +456,9 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		if sid := strings.TrimSpace(headers.Get("X-Session-ID")); sid != "" {
 			return "header:" + sid, ""
 		}
+		if sid := strings.TrimSpace(headers.Get("Session-Id")); sid != "" {
+			return "codex:" + sid, ""
+		}
 		if sid := strings.TrimSpace(headers.Get("Session_id")); sid != "" {
 			return "codex:" + sid, ""
 		}

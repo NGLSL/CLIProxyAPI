@@ -449,8 +449,15 @@ func TestApplyCodexWebsocketHeadersUsesCanonicalAccountHeader(t *testing.T) {
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", nil)
 
-	if got := headers.Get("ChatGPT-Account-ID"); got != "acct-1" {
+	if got := headerValueCaseInsensitive(headers, "ChatGPT-Account-ID"); got != "acct-1" {
 		t.Fatalf("ChatGPT-Account-ID = %s, want acct-1", got)
+	}
+	values, ok := headers["ChatGPT-Account-ID"]
+	if !ok {
+		t.Fatalf("expected exact ChatGPT-Account-ID key, got %#v", headers)
+	}
+	if len(values) != 1 || values[0] != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID values = %#v, want [acct-1]", values)
 	}
 }
 
