@@ -135,6 +135,9 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	if h.quotaCache != nil {
 		h.quotaCache.SetAuthManager(manager)
 	}
+	if h.quotaCacheScheduler != nil {
+		h.quotaCacheScheduler.NotifyConfigChanged()
+	}
 }
 
 // SetUsageStatistics allows replacing the usage statistics reference.

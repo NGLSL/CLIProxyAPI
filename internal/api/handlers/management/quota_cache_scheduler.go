@@ -79,6 +79,10 @@ func (s *quotaCacheScheduler) NotifyConfigChanged() {
 		return
 	}
 	select {
+	case <-s.configChangedC:
+	default:
+	}
+	select {
 	case s.configChangedC <- struct{}{}:
 	default:
 	}
@@ -124,7 +128,7 @@ func (s *quotaCacheScheduler) waitForNextCycle(ctx context.Context, wait time.Du
 	case <-ctx.Done():
 		return false, false
 	case <-s.configChangedC:
-		return false, true
+		return true, true
 	case <-timer.C:
 		return true, true
 	}
