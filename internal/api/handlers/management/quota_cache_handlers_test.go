@@ -563,8 +563,8 @@ func TestBuildCodexQuotaWindowsFallsBackToWindowOrderWithoutDuration(t *testing.
 	}
 }
 
-func TestBuildCodexQuotaWindowsDoesNotFallbackUnexpectedDuration(t *testing.T) {
-	t.Run("primary unexpected duration does not become five-hour", func(t *testing.T) {
+func TestBuildCodexQuotaWindowsLabelsDynamicDurations(t *testing.T) {
+	t.Run("primary custom duration is kept while secondary weekly remains weekly", func(t *testing.T) {
 		windows := buildCodexQuotaWindows(map[string]any{
 			"rate_limit": map[string]any{
 				"primary_window": map[string]any{
@@ -578,17 +578,33 @@ func TestBuildCodexQuotaWindowsDoesNotFallbackUnexpectedDuration(t *testing.T) {
 			},
 		})
 
-		if got := quotaWindowByID(windows, "five-hour"); got != nil {
-			t.Fatalf("unexpected five-hour window: %#v", got)
+		if got := quotaWindowByID(windows, "five-hour"); got == nil {
+			t.Fatal("missing primary custom duration window")
+		} else {
+			if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 44 {
+				t.Fatalf("primary custom usedPercent = %v, want 44", usedPercent)
+			}
+			if labelKey := quotaString(got["labelKey"]); labelKey != "codex_quota.custom_days_window" {
+				t.Fatalf("primary custom labelKey = %q, want codex_quota.custom_days_window", labelKey)
+			}
+			params := quotaMap(got["labelParams"])
+			if count, ok := quotaInt64(params["count"]); !ok || count != 1 {
+				t.Fatalf("primary custom count = %v, %v; want 1, true", count, ok)
+			}
 		}
 		if got := quotaWindowByID(windows, "weekly"); got == nil {
 			t.Fatal("missing weekly window")
-		} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 88 {
-			t.Fatalf("weekly usedPercent = %v, want 88", usedPercent)
+		} else {
+			if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 88 {
+				t.Fatalf("weekly usedPercent = %v, want 88", usedPercent)
+			}
+			if labelKey := quotaString(got["labelKey"]); labelKey != "codex_quota.secondary_window" {
+				t.Fatalf("weekly labelKey = %q, want codex_quota.secondary_window", labelKey)
+			}
 		}
 	})
 
-	t.Run("secondary unexpected duration does not become weekly", func(t *testing.T) {
+	t.Run("secondary custom duration is kept with custom label", func(t *testing.T) {
 		windows := buildCodexQuotaWindows(map[string]any{
 			"rate_limit": map[string]any{
 				"primary_window": map[string]any{
@@ -607,8 +623,45 @@ func TestBuildCodexQuotaWindowsDoesNotFallbackUnexpectedDuration(t *testing.T) {
 		} else if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 11 {
 			t.Fatalf("five-hour usedPercent = %v, want 11", usedPercent)
 		}
-		if got := quotaWindowByID(windows, "weekly"); got != nil {
-			t.Fatalf("unexpected weekly window: %#v", got)
+		if got := quotaWindowByID(windows, "weekly"); got == nil {
+			t.Fatal("missing secondary custom duration window")
+		} else {
+			if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 77 {
+				t.Fatalf("secondary custom usedPercent = %v, want 77", usedPercent)
+			}
+			if labelKey := quotaString(got["labelKey"]); labelKey != "codex_quota.custom_days_window" {
+				t.Fatalf("secondary custom labelKey = %q, want codex_quota.custom_days_window", labelKey)
+			}
+			params := quotaMap(got["labelParams"])
+			if count, ok := quotaInt64(params["count"]); !ok || count != 1 {
+				t.Fatalf("secondary custom count = %v, %v; want 1, true", count, ok)
+			}
+		}
+	})
+
+	t.Run("monthly duration uses monthly label", func(t *testing.T) {
+		windows := buildCodexQuotaWindows(map[string]any{
+			"rate_limit": map[string]any{
+				"primary_window": map[string]any{
+					"used_percent":         11,
+					"limit_window_seconds": 18000,
+				},
+				"secondary_window": map[string]any{
+					"used_percent":         55,
+					"limit_window_seconds": 2592000,
+				},
+			},
+		})
+
+		if got := quotaWindowByID(windows, "weekly"); got == nil {
+			t.Fatal("missing monthly window")
+		} else {
+			if usedPercent := quotaWindowUsedPercent(t, got); usedPercent != 55 {
+				t.Fatalf("monthly usedPercent = %v, want 55", usedPercent)
+			}
+			if labelKey := quotaString(got["labelKey"]); labelKey != "codex_quota.monthly_window" {
+				t.Fatalf("monthly labelKey = %q, want codex_quota.monthly_window", labelKey)
+			}
 		}
 	})
 }
