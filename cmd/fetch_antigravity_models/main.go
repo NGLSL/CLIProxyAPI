@@ -25,11 +25,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/misc"
-	sdkauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/proxyutil"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/logging"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/misc"
+	sdkauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/auth"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )

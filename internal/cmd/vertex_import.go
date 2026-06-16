@@ -9,11 +9,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/auth/vertex"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
-	sdkAuth "github.com/NGLSL/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/auth/vertex"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
+	sdkAuth "github.com/NGLSL/CLIProxyAPI/v7/sdk/auth"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 

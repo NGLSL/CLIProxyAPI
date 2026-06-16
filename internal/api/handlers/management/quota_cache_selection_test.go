@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func TestShouldRefreshQuotaEntry(t *testing.T) {

@@ -5,9 +5,9 @@
 package api
 
 import (
-	internalmanagement "github.com/NGLSL/CLIProxyAPI/v6/internal/api/handlers/management"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
+	internalmanagement "github.com/NGLSL/CLIProxyAPI/v7/internal/api/handlers/management"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/config"
 	"github.com/gin-gonic/gin"
 )
 

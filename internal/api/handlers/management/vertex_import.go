@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/auth/vertex"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/auth/vertex"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/gin-gonic/gin"
 )
 

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
-	coreusage "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	internalusage "github.com/NGLSL/CLIProxyAPI/v7/internal/usage"
+	coreusage "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/gin-gonic/gin"
 )
 

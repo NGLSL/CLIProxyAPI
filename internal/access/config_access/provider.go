@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	sdkaccess "github.com/NGLSL/CLIProxyAPI/v6/sdk/access"
-	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
+	sdkaccess "github.com/NGLSL/CLIProxyAPI/v7/sdk/access"
+	sdkconfig "github.com/NGLSL/CLIProxyAPI/v7/sdk/config"
 )
 
 // Register ensures the config-access provider is available to the access manager.

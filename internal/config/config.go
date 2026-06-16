@@ -14,7 +14,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -133,9 +133,6 @@ type Config struct {
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
 
-	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
-	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
-
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
@@ -150,7 +147,96 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// Plugins configures dynamic plugin discovery and per-plugin settings.
+	// Plugins are loaded from Dir when Enabled is true; Configs holds per-plugin
+	// overrides keyed by plugin ID. The plugin system is dormant when Enabled is
+	// false, which is the default.
+	Plugins PluginsConfig `yaml:"plugins" json:"plugins"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// PluginsConfig holds dynamic plugin system settings.
+type PluginsConfig struct {
+	// Enabled toggles dynamic plugin loading.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Dir is the plugin discovery directory.
+	Dir string `yaml:"dir" json:"dir"`
+	// StoreSources appends third-party plugin store registries to the built-in official source.
+	StoreSources []string `yaml:"store-sources,omitempty" json:"store-sources,omitempty"`
+	// Configs stores per-plugin instance configuration by plugin ID.
+	Configs map[string]PluginInstanceConfig `yaml:"configs" json:"configs"`
+}
+
+// PluginInstanceConfig stores host-owned plugin settings and the original plugin YAML subtree.
+type PluginInstanceConfig struct {
+	// Enabled toggles this plugin instance. Nil is normalized to true during YAML parsing.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Priority controls plugin startup and routing order.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+	// Raw preserves the full original plugin configuration YAML subtree.
+	Raw yaml.Node `yaml:"-" json:"-"`
+}
+
+// UnmarshalYAML extracts host-owned fields while preserving the full original YAML node.
+func (c *PluginInstanceConfig) UnmarshalYAML(value *yaml.Node) error {
+	if c == nil {
+		return nil
+	}
+
+	c.Priority = 0
+	defaultEnabled := true
+	c.Enabled = &defaultEnabled
+
+	if value == nil || value.Kind == 0 {
+		c.Raw = *defaultPluginInstanceConfigNode()
+		return nil
+	}
+
+	c.Raw = *deepCopyNode(value)
+	if value.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := value.Content[i]
+		node := value.Content[i+1]
+		if key == nil {
+			continue
+		}
+		switch key.Value {
+		case "enabled":
+			var enabled bool
+			if errDecodeEnabled := node.Decode(&enabled); errDecodeEnabled != nil {
+				return fmt.Errorf("parse plugin enabled: %w", errDecodeEnabled)
+			}
+			c.Enabled = &enabled
+		case "priority":
+			var priority int
+			if errDecodePriority := node.Decode(&priority); errDecodePriority != nil {
+				return fmt.Errorf("parse plugin priority: %w", errDecodePriority)
+			}
+			c.Priority = priority
+		}
+	}
+
+	return nil
+}
+
+// MarshalYAML returns the preserved raw plugin YAML subtree for lossless config output.
+func (c PluginInstanceConfig) MarshalYAML() (any, error) {
+	if c.Raw.Kind == 0 {
+		return defaultPluginInstanceConfigNode(), nil
+	}
+	return deepCopyNode(&c.Raw), nil
+}
+
+func defaultPluginInstanceConfigNode() *yaml.Node {
+	return &yaml.Node{
+		Kind:    yaml.MappingNode,
+		Tag:     "!!map",
+		Content: []*yaml.Node{},
+	}
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
@@ -240,6 +326,14 @@ type RoutingConfig struct {
 	SourcePreference string `yaml:"source-preference,omitempty" json:"source-preference,omitempty"`
 	// StickyTTL controls how long sticky-round-robin bindings remain valid, in seconds.
 	StickyTTL int `yaml:"sticky-ttl,omitempty" json:"sticky-ttl,omitempty"`
+
+	// SessionAffinity enables universal session-sticky routing for all clients.
+	// When enabled, requests with the same session ID are routed to the same auth entry.
+	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
+
+	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
+	// Accepts duration strings like "30m" or "2h". Default is 30 minutes.
+	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -250,63 +344,6 @@ type OAuthModelAlias struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
-}
-
-// AmpModelMapping defines a model name mapping for Amp CLI requests.
-// When Amp requests a model that isn't available locally, this mapping
-// allows routing to an alternative model that IS available.
-type AmpModelMapping struct {
-	// From is the model name that Amp CLI requests (e.g., "claude-opus-4.5").
-	From string `yaml:"from" json:"from"`
-
-	// To is the target model name to route to (e.g., "claude-sonnet-4").
-	// The target model must have available providers in the registry.
-	To string `yaml:"to" json:"to"`
-
-	// Regex indicates whether the 'from' field should be interpreted as a regular
-	// expression for matching model names. When true, this mapping is evaluated
-	// after exact matches and in the order provided. Defaults to false (exact match).
-	Regex bool `yaml:"regex,omitempty" json:"regex,omitempty"`
-}
-
-// AmpCode groups Amp CLI integration settings including upstream routing,
-// optional overrides, management route restrictions, and model fallback mappings.
-type AmpCode struct {
-	// UpstreamURL defines the upstream Amp control plane used for non-provider calls.
-	UpstreamURL string `yaml:"upstream-url" json:"upstream-url"`
-
-	// UpstreamAPIKey optionally overrides the Authorization header when proxying Amp upstream calls.
-	UpstreamAPIKey string `yaml:"upstream-api-key" json:"upstream-api-key"`
-
-	// UpstreamAPIKeys maps client API keys (from top-level api-keys) to upstream API keys.
-	// When a request is authenticated with one of the APIKeys, the corresponding UpstreamAPIKey
-	// is used for the upstream Amp request.
-	UpstreamAPIKeys []AmpUpstreamAPIKeyEntry `yaml:"upstream-api-keys,omitempty" json:"upstream-api-keys,omitempty"`
-
-	// RestrictManagementToLocalhost restricts Amp management routes (/api/user, /api/threads, etc.)
-	// to only accept connections from localhost (127.0.0.1, ::1). When true, prevents drive-by
-	// browser attacks and remote access to management endpoints. Default: false (API key auth is sufficient).
-	RestrictManagementToLocalhost bool `yaml:"restrict-management-to-localhost" json:"restrict-management-to-localhost"`
-
-	// ModelMappings defines model name mappings for Amp CLI requests.
-	// When Amp requests a model that isn't available locally, these mappings
-	// allow routing to an alternative model that IS available.
-	ModelMappings []AmpModelMapping `yaml:"model-mappings" json:"model-mappings"`
-
-	// ForceModelMappings when true, model mappings take precedence over local API keys.
-	// When false (default), local API keys are used first if available.
-	ForceModelMappings bool `yaml:"force-model-mappings" json:"force-model-mappings"`
-}
-
-// AmpUpstreamAPIKeyEntry maps a set of client API keys to a specific upstream API key.
-// When a request is authenticated with one of the APIKeys, the corresponding UpstreamAPIKey
-// is used for the upstream Amp request.
-type AmpUpstreamAPIKeyEntry struct {
-	// UpstreamAPIKey is the API key to use when proxying to the Amp upstream.
-	UpstreamAPIKey string `yaml:"upstream-api-key" json:"upstream-api-key"`
-
-	// APIKeys are the client API keys (from top-level api-keys) that map to this upstream key.
-	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -688,7 +725,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
-	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.Routing.SourcePreference = DefaultRoutingSourcePreference
 	cfg.Routing.StickyTTL = DefaultRoutingStickyTTL
@@ -711,8 +747,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// 	if cfg.migrateLegacyOpenAICompatibilityKeys(legacy.OpenAICompat) {
 	// 		cfg.legacyMigrationPending = true
 	// 	}
-	// 	if cfg.migrateLegacyAmpConfig(&legacy) {
-	// 		cfg.legacyMigrationPending = true
+	// 	if cfg.legacyMigrationPending {
 	// 	}
 	// }
 
@@ -792,6 +827,28 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
+	// Normalize plugin settings: default the discovery directory, dedupe store
+	// sources, and ensure the per-plugin config map is non-nil so callers can
+	// safely range over it without nil checks.
+	cfg.Plugins.Dir = strings.TrimSpace(cfg.Plugins.Dir)
+	if cfg.Plugins.Dir == "" {
+		cfg.Plugins.Dir = "plugins"
+	}
+	if len(cfg.Plugins.StoreSources) > 0 {
+		sources := make([]string, 0, len(cfg.Plugins.StoreSources))
+		for _, source := range cfg.Plugins.StoreSources {
+			trimmed := strings.TrimSpace(source)
+			if trimmed == "" {
+				continue
+			}
+			sources = append(sources, trimmed)
+		}
+		cfg.Plugins.StoreSources = sources
+	}
+	if cfg.Plugins.Configs == nil {
+		cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
+	}
+
 	// NOTE: Legacy migration persistence is intentionally disabled together with
 	// startup legacy migration to keep startup read-only for config.yaml.
 	// Re-enable the block below if automatic startup migration is needed again.
@@ -809,6 +866,31 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// NormalizePluginsConfig applies default plugin configuration values.
+func (cfg *Config) NormalizePluginsConfig() {
+	if cfg == nil {
+		return
+	}
+	cfg.Plugins.Dir = strings.TrimSpace(cfg.Plugins.Dir)
+	if cfg.Plugins.Dir == "" {
+		cfg.Plugins.Dir = "plugins"
+	}
+	if len(cfg.Plugins.StoreSources) > 0 {
+		sources := make([]string, 0, len(cfg.Plugins.StoreSources))
+		for _, source := range cfg.Plugins.StoreSources {
+			trimmed := strings.TrimSpace(source)
+			if trimmed == "" {
+				continue
+			}
+			sources = append(sources, trimmed)
+		}
+		cfg.Plugins.StoreSources = sources
+	}
+	if cfg.Plugins.Configs == nil {
+		cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
+	}
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
@@ -1833,12 +1915,8 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 
 // Legacy migration helpers (move deprecated config keys into structured fields).
 type legacyConfigData struct {
-	LegacyGeminiKeys      []string                    `yaml:"generative-language-api-key"`
-	OpenAICompat          []legacyOpenAICompatibility `yaml:"openai-compatibility"`
-	AmpUpstreamURL        string                      `yaml:"amp-upstream-url"`
-	AmpUpstreamAPIKey     string                      `yaml:"amp-upstream-api-key"`
-	AmpRestrictManagement *bool                       `yaml:"amp-restrict-management-to-localhost"`
-	AmpModelMappings      []AmpModelMapping           `yaml:"amp-model-mappings"`
+	LegacyGeminiKeys []string                    `yaml:"generative-language-api-key"`
+	OpenAICompat     []legacyOpenAICompatibility `yaml:"openai-compatibility"`
 }
 
 type legacyOpenAICompatibility struct {
@@ -1949,34 +2027,6 @@ func findOpenAICompatTarget(entries []OpenAICompatibility, legacyName, legacyBas
 		}
 	}
 	return nil
-}
-
-func (cfg *Config) migrateLegacyAmpConfig(legacy *legacyConfigData) bool {
-	if cfg == nil || legacy == nil {
-		return false
-	}
-	changed := false
-	if cfg.AmpCode.UpstreamURL == "" {
-		if val := strings.TrimSpace(legacy.AmpUpstreamURL); val != "" {
-			cfg.AmpCode.UpstreamURL = val
-			changed = true
-		}
-	}
-	if cfg.AmpCode.UpstreamAPIKey == "" {
-		if val := strings.TrimSpace(legacy.AmpUpstreamAPIKey); val != "" {
-			cfg.AmpCode.UpstreamAPIKey = val
-			changed = true
-		}
-	}
-	if legacy.AmpRestrictManagement != nil {
-		cfg.AmpCode.RestrictManagementToLocalhost = *legacy.AmpRestrictManagement
-		changed = true
-	}
-	if len(cfg.AmpCode.ModelMappings) == 0 && len(legacy.AmpModelMappings) > 0 {
-		cfg.AmpCode.ModelMappings = append([]AmpModelMapping(nil), legacy.AmpModelMappings...)
-		changed = true
-	}
-	return changed
 }
 
 func removeLegacyOpenAICompatAPIKeys(root *yaml.Node) {

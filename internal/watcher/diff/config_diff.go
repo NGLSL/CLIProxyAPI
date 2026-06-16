@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 )
 
 // BuildConfigChangeDetails computes a redacted, human-readable list of config changes.
@@ -221,39 +221,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
-	// AmpCode settings (redacted where needed)
-	oldAmpURL := strings.TrimSpace(oldCfg.AmpCode.UpstreamURL)
-	newAmpURL := strings.TrimSpace(newCfg.AmpCode.UpstreamURL)
-	if oldAmpURL != newAmpURL {
-		changes = append(changes, fmt.Sprintf("ampcode.upstream-url: %s -> %s", oldAmpURL, newAmpURL))
-	}
-	oldAmpKey := strings.TrimSpace(oldCfg.AmpCode.UpstreamAPIKey)
-	newAmpKey := strings.TrimSpace(newCfg.AmpCode.UpstreamAPIKey)
-	switch {
-	case oldAmpKey == "" && newAmpKey != "":
-		changes = append(changes, "ampcode.upstream-api-key: added")
-	case oldAmpKey != "" && newAmpKey == "":
-		changes = append(changes, "ampcode.upstream-api-key: removed")
-	case oldAmpKey != newAmpKey:
-		changes = append(changes, "ampcode.upstream-api-key: updated")
-	}
-	if oldCfg.AmpCode.RestrictManagementToLocalhost != newCfg.AmpCode.RestrictManagementToLocalhost {
-		changes = append(changes, fmt.Sprintf("ampcode.restrict-management-to-localhost: %t -> %t", oldCfg.AmpCode.RestrictManagementToLocalhost, newCfg.AmpCode.RestrictManagementToLocalhost))
-	}
-	oldMappings := SummarizeAmpModelMappings(oldCfg.AmpCode.ModelMappings)
-	newMappings := SummarizeAmpModelMappings(newCfg.AmpCode.ModelMappings)
-	if oldMappings.hash != newMappings.hash {
-		changes = append(changes, fmt.Sprintf("ampcode.model-mappings: updated (%d -> %d entries)", oldMappings.count, newMappings.count))
-	}
-	if oldCfg.AmpCode.ForceModelMappings != newCfg.AmpCode.ForceModelMappings {
-		changes = append(changes, fmt.Sprintf("ampcode.force-model-mappings: %t -> %t", oldCfg.AmpCode.ForceModelMappings, newCfg.AmpCode.ForceModelMappings))
-	}
-	oldUpstreamAPIKeysCount := len(oldCfg.AmpCode.UpstreamAPIKeys)
-	newUpstreamAPIKeysCount := len(newCfg.AmpCode.UpstreamAPIKeys)
-	if !equalUpstreamAPIKeys(oldCfg.AmpCode.UpstreamAPIKeys, newCfg.AmpCode.UpstreamAPIKeys) {
-		changes = append(changes, fmt.Sprintf("ampcode.upstream-api-keys: updated (%d -> %d entries)", oldUpstreamAPIKeysCount, newUpstreamAPIKeysCount))
-	}
-
 	if entries, _ := DiffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}
@@ -427,19 +394,3 @@ func equalStringSet(a, b []string) bool {
 	return true
 }
 
-// equalUpstreamAPIKeys compares two slices of AmpUpstreamAPIKeyEntry for equality.
-// Comparison is done by count and content (upstream key and client keys).
-func equalUpstreamAPIKeys(a, b []config.AmpUpstreamAPIKeyEntry) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if strings.TrimSpace(a[i].UpstreamAPIKey) != strings.TrimSpace(b[i].UpstreamAPIKey) {
-			return false
-		}
-		if !equalStringSet(a[i].APIKeys, b[i].APIKeys) {
-			return false
-		}
-	}
-	return true
-}

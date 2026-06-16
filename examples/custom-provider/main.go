@@ -23,14 +23,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/api"
-	sdkAuth "github.com/NGLSL/CLIProxyAPI/v6/sdk/auth"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	clipexec "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/logging"
-	sdktr "github.com/NGLSL/CLIProxyAPI/v6/sdk/translator"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/api"
+	sdkAuth "github.com/NGLSL/CLIProxyAPI/v7/sdk/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	clipexec "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/logging"
+	sdktr "github.com/NGLSL/CLIProxyAPI/v7/sdk/translator"
 	"github.com/gin-gonic/gin"
 )
 

@@ -9,8 +9,8 @@
 package claude
 
 import (
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -95,12 +95,9 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 
 	case thinking.ModeLevel:
 		// Adaptive thinking effort is only valid when the model advertises discrete levels.
-		// (Claude 4.6 uses output_config.effort.)
+		// (Claude 4.6+ uses output_config.effort.)
 		if supportsAdaptive && config.Level != "" {
-			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
-			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-			result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
-			return result, nil
+			return applyAdaptiveClaude(body, string(config.Level), modelInfo), nil
 		}
 
 		// Fallback for non-adaptive Claude models: convert level to budget_tokens.
@@ -126,6 +123,12 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 			return result, nil
 		}
 
+		if supportsAdaptive {
+			if level, ok := thinking.ConvertBudgetToLevel(config.Budget); ok {
+				return applyAdaptiveClaude(body, level, modelInfo), nil
+			}
+		}
+
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
 		result, _ = sjson.DeleteBytes(result, "output_config.effort")
@@ -138,16 +141,10 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return result, nil
 
 	case thinking.ModeAuto:
-		// For Claude 4.6 models, auto maps to adaptive thinking with upstream defaults.
+		// Adaptive Claude models require output_config.effort instead of the legacy
+		// thinking budget field, so auto uses a stable medium effort default.
 		if supportsAdaptive {
-			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
-			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-			// Explicit effort is optional for adaptive thinking; omit it to allow upstream default.
-			result, _ = sjson.DeleteBytes(result, "output_config.effort")
-			if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-				result, _ = sjson.DeleteBytes(result, "output_config")
-			}
-			return result, nil
+			return applyAdaptiveClaude(body, string(thinking.LevelMedium), modelInfo), nil
 		}
 
 		// Legacy fallback: enable thinking without specifying budget_tokens.
@@ -162,6 +159,18 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	default:
 		return body, nil
 	}
+}
+
+func applyAdaptiveClaude(body []byte, level string, modelInfo *registry.ModelInfo) []byte {
+	supportsMax := modelInfo != nil && modelInfo.Thinking != nil && thinking.HasLevel(modelInfo.Thinking.Levels, string(thinking.LevelMax))
+	effort, ok := thinking.MapToClaudeEffort(level, supportsMax)
+	if !ok {
+		return body
+	}
+	result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+	result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+	result, _ = sjson.SetBytes(result, "output_config.effort", effort)
+	return result
 }
 
 // normalizeClaudeBudget applies Claude-specific constraints to ensure max_tokens > budget_tokens.

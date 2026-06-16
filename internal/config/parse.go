@@ -25,7 +25,6 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
-	cfg.AmpCode.RestrictManagementToLocalhost = false
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.Routing.SourcePreference = DefaultRoutingSourcePreference
 	cfg.Routing.StickyTTL = DefaultRoutingStickyTTL

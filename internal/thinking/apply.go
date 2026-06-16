@@ -3,14 +3,30 @@ package thinking
 
 import (
 	"strings"
+	"sync"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
 
-// providerAppliers maps provider names to their ProviderApplier implementations.
-var providerAppliers = map[string]ProviderApplier{
+// pluginProviderApplier pairs a plugin-owned ProviderApplier with its owner
+// plugin ID and priority. Priority and owner break ties when multiple plugins
+// try to register the same provider name; the highest priority wins, with the
+// lexicographically-smaller owner ID acting as a deterministic tiebreaker.
+type pluginProviderApplier struct {
+	owner    string
+	priority int
+	applier  ProviderApplier
+}
+
+// providerAppliersMu guards both nativeProviderAppliers and pluginProviderAppliers.
+// All reads and writes of either map must hold the mutex (read-lock for reads,
+// write-lock for writes) because plugins can register providers at runtime.
+var providerAppliersMu sync.RWMutex
+
+// nativeProviderAppliers maps built-in provider names to their implementations.
+var nativeProviderAppliers = map[string]ProviderApplier{
 	"gemini":      nil,
 	"gemini-cli":  nil,
 	"claude":      nil,
@@ -21,15 +37,96 @@ var providerAppliers = map[string]ProviderApplier{
 	"xai":         nil,
 }
 
+// pluginProviderAppliers maps plugin-owned provider names to their implementations.
+var pluginProviderAppliers = map[string]pluginProviderApplier{}
+
 // GetProviderApplier returns the ProviderApplier for the given provider name.
-// Returns nil if the provider is not registered.
+// Returns nil if the provider is not registered. Both native and plugin-owned
+// providers are considered; native providers always take precedence over
+// plugin providers with the same normalized name.
 func GetProviderApplier(provider string) ProviderApplier {
-	return providerAppliers[provider]
+	provider = normalizedProviderName(provider)
+	if provider == "" {
+		return nil
+	}
+	providerAppliersMu.RLock()
+	defer providerAppliersMu.RUnlock()
+	if nativeApplier, okNative := nativeProviderAppliers[provider]; okNative {
+		return nativeApplier
+	}
+	return pluginProviderAppliers[provider].applier
 }
 
-// RegisterProvider registers a provider applier by name.
+// RegisterProvider registers a built-in provider applier by name. The name is
+// normalized to lower case before storage so that callers can pass mixed-case
+// provider identifiers without fragmenting the registry.
 func RegisterProvider(name string, applier ProviderApplier) {
-	providerAppliers[name] = applier
+	name = normalizedProviderName(name)
+	if name == "" {
+		return
+	}
+	providerAppliersMu.Lock()
+	defer providerAppliersMu.Unlock()
+	nativeProviderAppliers[name] = applier
+}
+
+// RegisterPluginProvider registers a plugin-owned provider applier. owner is
+// the plugin ID claiming the provider; priority is used to arbitrate when
+// multiple plugins target the same name (higher priority wins; on ties the
+// lexicographically-smaller owner wins). The function returns false when the
+// registration was rejected because a native provider owns the name, or because
+// an existing plugin registration wins the priority/owner comparison.
+func RegisterPluginProvider(owner string, name string, priority int, applier ProviderApplier) bool {
+	owner = strings.TrimSpace(owner)
+	name = normalizedProviderName(name)
+	if owner == "" || name == "" || applier == nil {
+		return false
+	}
+	providerAppliersMu.Lock()
+	defer providerAppliersMu.Unlock()
+	if _, native := nativeProviderAppliers[name]; native {
+		return false
+	}
+	current, exists := pluginProviderAppliers[name]
+	if exists && (current.priority > priority || (current.priority == priority && current.owner <= owner)) {
+		return false
+	}
+	pluginProviderAppliers[name] = pluginProviderApplier{
+		owner:    owner,
+		priority: priority,
+		applier:  applier,
+	}
+	return true
+}
+
+// UnregisterPluginProviders removes every provider applier owned by the given
+// plugin. Called when a plugin is unloaded so that its provider customizations
+// disappear from subsequent GetProviderApplier lookups.
+func UnregisterPluginProviders(owner string) {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return
+	}
+	providerAppliersMu.Lock()
+	defer providerAppliersMu.Unlock()
+	for provider, record := range pluginProviderAppliers {
+		if record.owner == owner {
+			delete(pluginProviderAppliers, provider)
+		}
+	}
+}
+
+// ClearPluginProviders removes all plugin-owned provider appliers. Native
+// providers are preserved. This is invoked when the plugin host is reset so
+// stale registrations from a previous plugin generation do not linger.
+func ClearPluginProviders() {
+	providerAppliersMu.Lock()
+	defer providerAppliersMu.Unlock()
+	pluginProviderAppliers = map[string]pluginProviderApplier{}
+}
+
+func normalizedProviderName(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
 }
 
 // IsUserDefinedModel reports whether the model is a user-defined model that should

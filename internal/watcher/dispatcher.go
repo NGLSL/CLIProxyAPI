@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/watcher/synthesizer"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/watcher/synthesizer"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 var snapshotCoreAuthsFunc = snapshotCoreAuths
@@ -77,12 +77,54 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	return true
 }
 
+func (w *Watcher) dispatchPersistedAuthUpdate(update AuthUpdate) bool {
+	if w == nil {
+		return false
+	}
+	if update.Auth == nil || update.Auth.ID == "" {
+		return false
+	}
+	path := ""
+	if update.Auth.Attributes != nil {
+		path = update.Auth.Attributes["path"]
+		if path == "" {
+			path = update.Auth.Attributes["source"]
+		}
+	}
+	normalized := w.normalizeAuthPath(path)
+	if normalized == "" {
+		return false
+	}
+	clone := update.Auth.Clone()
+	w.clientsMutex.Lock()
+	if w.fileAuthsByPath == nil {
+		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
+	}
+	pathAuths := w.fileAuthsByPath[normalized]
+	if pathAuths == nil {
+		pathAuths = make(map[string]*coreauth.Auth)
+		w.fileAuthsByPath[normalized] = pathAuths
+	}
+	pathAuths[clone.ID] = nil
+	if w.currentAuths == nil {
+		w.currentAuths = make(map[string]*coreauth.Auth)
+	}
+	w.currentAuths[clone.ID] = clone
+	w.clientsMutex.Unlock()
+	if w.getAuthQueue() == nil {
+		return false
+	}
+	w.dispatchAuthUpdates([]AuthUpdate{update})
+	return true
+}
+
 func (w *Watcher) refreshAuthState(force bool) {
 	w.clientsMutex.RLock()
 	cfg := w.config
 	authDir := w.authDir
+	parser := w.pluginAuthParser
 	w.clientsMutex.RUnlock()
-	auths := snapshotCoreAuthsFunc(cfg, authDir)
+	auths := snapshotCoreAuthsFunc(cfg, authDir, parser)
 	w.clientsMutex.Lock()
 	if len(w.runtimeAuths) > 0 {
 		for _, a := range w.runtimeAuths {
@@ -255,12 +297,13 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 	return clone
 }
 
-func snapshotCoreAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
+func snapshotCoreAuths(cfg *config.Config, authDir string, parser synthesizer.PluginAuthParser) []*coreauth.Auth {
 	ctx := &synthesizer.SynthesisContext{
-		Config:      cfg,
-		AuthDir:     authDir,
-		Now:         time.Now(),
-		IDGenerator: synthesizer.NewStableIDGenerator(),
+		Config:           cfg,
+		AuthDir:          authDir,
+		Now:              time.Now(),
+		IDGenerator:      synthesizer.NewStableIDGenerator(),
+		PluginAuthParser: parser,
 	}
 
 	var out []*coreauth.Auth

@@ -5,8 +5,8 @@
 package xai
 
 import (
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking/provider/codex"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/thinking"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/thinking/provider/codex"
 )
 
 // Applier implements thinking.ProviderApplier for xAI models.

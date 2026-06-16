@@ -11,7 +11,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 	log "github.com/sirupsen/logrus"
 )
 

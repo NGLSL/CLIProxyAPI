@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/home"
-	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/home"
+	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 type homeStatusErr struct {

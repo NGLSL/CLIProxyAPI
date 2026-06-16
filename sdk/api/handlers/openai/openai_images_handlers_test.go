@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	internalconfig "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/api/handlers"
-	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
+	internalconfig "github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/api/handlers"
+	sdkconfig "github.com/NGLSL/CLIProxyAPI/v7/sdk/config"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )

@@ -14,14 +14,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
-	sdktranslator "github.com/NGLSL/CLIProxyAPI/v6/sdk/translator"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/logging"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/thinking"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/config"
+	sdktranslator "github.com/NGLSL/CLIProxyAPI/v7/sdk/translator"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"golang.org/x/net/context"
@@ -62,6 +62,9 @@ type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 type disallowFreeAuthContextKey struct{}
+
+// PluginInterceptorHost is the optional plugin host attached to API handlers.
+type PluginInterceptorHost interface{}
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
@@ -257,6 +260,12 @@ func requestForwardHeaders(ctx context.Context) http.Header {
 	if ctx == nil {
 		return nil
 	}
+	// Plugin-issued model executions stash explicit forward headers on the
+	// context via WithModelExecutionForward; honour them before falling back
+	// to the gin request headers so plugin callers can override forwarding.
+	if overrideHeaders, _, hasOverride := modelExecutionForwardFromContext(ctx); hasOverride && overrideHeaders != nil {
+		return cloneHeader(overrideHeaders)
+	}
 	ginCtx, ok := ctx.Value("gin").(*gin.Context)
 	if !ok || ginCtx == nil || ginCtx.Request == nil {
 		return nil
@@ -270,6 +279,22 @@ func requestForwardHeaders(ctx context.Context) http.Header {
 func requestForwardQuery(ctx context.Context) url.Values {
 	if ctx == nil {
 		return nil
+	}
+	// See requestForwardHeaders: prefer plugin-supplied query overrides.
+	if _, overrideQuery, hasOverride := modelExecutionForwardFromContext(ctx); hasOverride && overrideQuery != nil {
+		cloned := url.Values{}
+		for key, values := range overrideQuery {
+			if len(values) == 0 {
+				continue
+			}
+			cloned[key] = append([]string(nil), values...)
+		}
+		cloned.Del("alt")
+		cloned.Del("$alt")
+		if len(cloned) == 0 {
+			return nil
+		}
+		return cloned
 	}
 	ginCtx, ok := ctx.Value("gin").(*gin.Context)
 	if !ok || ginCtx == nil || ginCtx.Request == nil || ginCtx.Request.URL == nil {
@@ -376,6 +401,9 @@ type BaseAPIHandler struct {
 
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
+
+	// PluginHost is the optional plugin host attached to this handler.
+	PluginHost PluginInterceptorHost
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -401,6 +429,14 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
 func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
+
+// SetPluginHost configures the optional plugin host attached to handler execution.
+func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {
+	if h == nil {
+		return
+	}
+	h.PluginHost = host
+}
 
 // GetAlt extracts the 'alt' parameter from the request query string.
 // It checks both 'alt' and '$alt' parameters and returns the appropriate value.

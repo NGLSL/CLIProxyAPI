@@ -9,12 +9,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
 
-	sdkAuth "github.com/NGLSL/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	sdkAuth "github.com/NGLSL/CLIProxyAPI/v7/sdk/auth"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -57,6 +58,7 @@ type Watcher struct {
 	pendingOrder      []string
 	dispatchCancel    context.CancelFunc
 	storePersister    storePersister
+	pluginAuthParser  synthesizer.PluginAuthParser
 	mirroredAuthDir   string
 	oldConfigYaml     []byte
 }
@@ -138,6 +140,13 @@ func (w *Watcher) SetConfig(cfg *config.Config) {
 	w.oldConfigYaml, _ = yaml.Marshal(cfg)
 }
 
+// SetPluginAuthParser updates the plugin auth parser used for file auth synthesis.
+func (w *Watcher) SetPluginAuthParser(parser synthesizer.PluginAuthParser) {
+	w.clientsMutex.Lock()
+	defer w.clientsMutex.Unlock()
+	w.pluginAuthParser = parser
+}
+
 // SetAuthUpdateQueue sets the queue used to emit auth updates.
 func (w *Watcher) SetAuthUpdateQueue(queue chan<- AuthUpdate) {
 	w.setAuthUpdateQueue(queue)
@@ -150,10 +159,16 @@ func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	return w.dispatchRuntimeAuthUpdate(update)
 }
 
+// DispatchPersistedAuthUpdate pushes a persisted file-backed auth update through the watcher queue.
+func (w *Watcher) DispatchPersistedAuthUpdate(update AuthUpdate) bool {
+	return w.dispatchPersistedAuthUpdate(update)
+}
+
 // SnapshotCoreAuths converts current clients snapshot into core auth entries.
 func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	w.clientsMutex.RLock()
 	cfg := w.config
+	parser := w.pluginAuthParser
 	w.clientsMutex.RUnlock()
-	return snapshotCoreAuths(cfg, w.authDir)
+	return snapshotCoreAuths(cfg, w.authDir, parser)
 }

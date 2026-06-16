@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
 )
 
 type codexClientModelsPayload struct {

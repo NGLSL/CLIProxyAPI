@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/NGLSL/CLIProxyAPI/v6/sdk/translator"
+	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/NGLSL/CLIProxyAPI/v7/sdk/translator"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"

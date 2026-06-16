@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 // Manager aggregates authenticators and coordinates persistence via a token store.

@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,10 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/auth/codex"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/runtime/geminicli"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/watcher/diff"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/auth/codex"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/runtime/geminicli"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/watcher/diff"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // FileSynthesizer generates Auth entries from OAuth JSON files.
@@ -77,10 +79,33 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		return nil
 	}
 	t, _ := metadata["type"].(string)
-	if t == "" {
+	provider := strings.ToLower(strings.TrimSpace(t))
+	if ctx.PluginAuthParser != nil {
+		auth, handled, errParse := ctx.PluginAuthParser.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+			Provider: provider,
+			Path:     fullPath,
+			FileName: filepath.Base(fullPath),
+			RawJSON:  data,
+		})
+		if errParse == nil && handled && auth != nil {
+			auth.CreatedAt = now
+			auth.UpdatedAt = now
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string)
+			}
+			auth.Attributes["path"] = fullPath
+			auth.Attributes["source"] = fullPath
+			auth.Attributes["source_type"] = "file"
+			perAccountExcluded := extractExcludedModelsFromMetadata(metadata)
+			applyAuthAllowedModelsMeta(auth, extractAllowedModelsFromMetadata(metadata))
+			coreauth.ApplyCustomHeadersFromMetadata(auth)
+			ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
+			return []*coreauth.Auth{auth}
+		}
+	}
+	if provider == "" {
 		return nil
 	}
-	provider := strings.ToLower(t)
 	if provider == "gemini" {
 		provider = "gemini-cli"
 	}

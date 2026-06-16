@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/misc"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/misc"
 )
 
 // KimiTokenStorage stores OAuth2 token information for Kimi API authentication.

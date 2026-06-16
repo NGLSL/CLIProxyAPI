@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 const defaultQuotaCacheRefreshInterval = time.Hour

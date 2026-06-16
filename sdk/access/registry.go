@@ -60,10 +60,32 @@ func StableIndex(provider, principal string) string {
 }
 
 var (
-	registryMu sync.RWMutex
-	registry   = make(map[string]Provider)
-	order      []string
+	registryMu        sync.RWMutex
+	registry          = make(map[string]Provider)
+	order             []string
+	exclusiveProvider string
 )
+
+// SetExclusiveProvider restricts RegisteredProviders to a single provider key
+// when set. Plugins use this to take over front-door authentication
+// exclusively (for example when a plugin installs a higher-priority credential
+// verifier). Passing an unknown type is harmless: RegisteredProviders falls
+// back to the full ordered list when the exclusive entry is missing.
+func SetExclusiveProvider(typ string) {
+	normalizedType := strings.TrimSpace(typ)
+	registryMu.Lock()
+	exclusiveProvider = normalizedType
+	registryMu.Unlock()
+}
+
+// ClearExclusiveProvider removes any active provider restriction installed by
+// SetExclusiveProvider. It is called when the exclusive plugin shuts down so
+// the regular provider chain resumes.
+func ClearExclusiveProvider() {
+	registryMu.Lock()
+	exclusiveProvider = ""
+	registryMu.Unlock()
+}
 
 // RegisterProvider registers a pre-built provider instance for a given type identifier.
 func RegisterProvider(typ string, provider Provider) {
@@ -103,11 +125,19 @@ func UnregisterProvider(typ string) {
 }
 
 // RegisteredProviders returns the global provider instances in registration order.
+// When a plugin has installed an exclusive provider via SetExclusiveProvider and
+// that provider is still registered, only that provider is returned.
 func RegisteredProviders() []Provider {
 	registryMu.RLock()
 	if len(order) == 0 {
 		registryMu.RUnlock()
 		return nil
+	}
+	if exclusiveProvider != "" {
+		if provider, exists := registry[exclusiveProvider]; exists && provider != nil {
+			registryMu.RUnlock()
+			return []Provider{provider}
+		}
 	}
 	providers := make([]Provider, 0, len(order))
 	for _, providerType := range order {

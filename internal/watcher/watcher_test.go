@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/watcher/diff"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/watcher/synthesizer"
-	sdkAuth "github.com/NGLSL/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/watcher/diff"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/watcher/synthesizer"
+	sdkAuth "github.com/NGLSL/CLIProxyAPI/v7/sdk/auth"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
 )
@@ -451,9 +451,9 @@ func TestAuthFileEventsDoNotInvokeSnapshotCoreAuths(t *testing.T) {
 
 	origSnapshot := snapshotCoreAuthsFunc
 	var snapshotCalls int32
-	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string) []*coreauth.Auth {
+	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string, parser synthesizer.PluginAuthParser) []*coreauth.Auth {
 		atomic.AddInt32(&snapshotCalls, 1)
-		return origSnapshot(cfg, authDir)
+		return origSnapshot(cfg, authDir, parser)
 	}
 	defer func() { snapshotCoreAuthsFunc = origSnapshot }()
 

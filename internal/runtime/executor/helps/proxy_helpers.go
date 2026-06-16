@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/proxyutil"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 

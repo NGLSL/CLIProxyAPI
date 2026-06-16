@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/api/handlers"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdkconfig "github.com/NGLSL/CLIProxyAPI/v7/sdk/config"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )

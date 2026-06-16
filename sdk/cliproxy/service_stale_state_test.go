@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
-	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
-	sdkaccess "github.com/NGLSL/CLIProxyAPI/v6/sdk/access"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreusage "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
+	internalusage "github.com/NGLSL/CLIProxyAPI/v7/internal/usage"
+	sdkaccess "github.com/NGLSL/CLIProxyAPI/v7/sdk/access"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/config"
 )
 
 func TestServiceApplyCoreAuthAddOrUpdate_DeleteReAddDoesNotInheritStaleRuntimeState(t *testing.T) {

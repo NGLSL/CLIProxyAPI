@@ -7,10 +7,10 @@ package api
 import (
 	"time"
 
-	internalapi "github.com/NGLSL/CLIProxyAPI/v6/internal/api"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/api/handlers"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/logging"
+	internalapi "github.com/NGLSL/CLIProxyAPI/v7/internal/api"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/logging"
 	"github.com/gin-gonic/gin"
 )
 

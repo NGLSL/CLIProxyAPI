@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	internalconfig "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+	internalconfig "github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 )
 
 func TestLookupAPIKeyUpstreamModel(t *testing.T) {

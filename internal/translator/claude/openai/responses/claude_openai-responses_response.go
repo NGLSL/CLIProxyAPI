@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	translatorcommon "github.com/NGLSL/CLIProxyAPI/v6/internal/translator/common"
+	translatorcommon "github.com/NGLSL/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

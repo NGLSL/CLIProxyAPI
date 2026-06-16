@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 )
 
 // DiffOpenAICompatibility produces human-readable change descriptions.

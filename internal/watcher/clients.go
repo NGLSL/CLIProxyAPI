@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/watcher/diff"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/watcher/synthesizer"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/watcher/diff"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/watcher/synthesizer"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -26,6 +26,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	w.clientsMutex.RLock()
 	cfg := w.config
+	pluginAuthParser := w.pluginAuthParser
 	w.clientsMutex.RUnlock()
 
 	if cfg == nil {
@@ -109,10 +110,11 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 							}
 						}
 						ctx := &synthesizer.SynthesisContext{
-							Config:      cfg,
-							AuthDir:     resolvedAuthDir,
-							Now:         time.Now(),
-							IDGenerator: synthesizer.NewStableIDGenerator(),
+							Config:           cfg,
+							AuthDir:          resolvedAuthDir,
+							Now:              time.Now(),
+							IDGenerator:      synthesizer.NewStableIDGenerator(),
+							PluginAuthParser: pluginAuthParser,
 						}
 						if generated := synthesizer.SynthesizeAuthFile(ctx, fullPath, data); len(generated) > 0 {
 							if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
@@ -216,10 +218,11 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 	// Build synthesized auth entries for this single file only.
 	sctx := &synthesizer.SynthesisContext{
-		Config:      w.config,
-		AuthDir:     w.authDir,
-		Now:         time.Now(),
-		IDGenerator: synthesizer.NewStableIDGenerator(),
+		Config:           w.config,
+		AuthDir:          w.authDir,
+		Now:              time.Now(),
+		IDGenerator:      synthesizer.NewStableIDGenerator(),
+		PluginAuthParser: w.pluginAuthParser,
 	}
 	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
 	newByID := authSliceToMap(generated)

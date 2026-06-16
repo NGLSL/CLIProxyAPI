@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking"
-	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/thinking"
+	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 

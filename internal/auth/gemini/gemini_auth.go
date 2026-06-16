@@ -13,12 +13,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/auth/codex"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/browser"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/misc"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/proxyutil"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/auth/codex"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/browser"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/misc"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 

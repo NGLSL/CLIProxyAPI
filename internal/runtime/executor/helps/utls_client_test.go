@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	sdkconfig "github.com/NGLSL/CLIProxyAPI/v7/sdk/config"
 )
 
 func TestNewUtlsHTTPClientReusesTransportForInheritedProxySetting(t *testing.T) {

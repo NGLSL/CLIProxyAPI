@@ -24,10 +24,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/buildinfo"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/home"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/buildinfo"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/home"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
 )
 
 var requestLogID atomic.Uint64

@@ -1,12 +1,13 @@
 package cliproxy
 
 import (
+	"context"
 	"strings"
 	"testing"
 
-	internalregistry "github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
+	internalregistry "github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/config"
 )
 
 func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T) {
@@ -33,7 +34,7 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 		registry.UnregisterClient(auth.ID)
 	})
 
-	service.registerModelsForAuth(auth)
+	service.registerModelsForAuth(context.Background(), auth)
 
 	models := registry.GetAvailableModelsByProvider("gemini-cli")
 	if len(models) == 0 {
@@ -83,7 +84,7 @@ func TestRegisterModelsForAuth_UsesAuthAllowedModelsAttribute(t *testing.T) {
 		registry.UnregisterClient(auth.ID)
 	})
 
-	service.registerModelsForAuth(auth)
+	service.registerModelsForAuth(context.Background(), auth)
 
 	if !registry.ClientSupportsModel(auth.ID, "gemini-2.5-flash") {
 		t.Fatal("expected auth client to support allowed static model")
@@ -147,7 +148,7 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 		registry.UnregisterClient(auth.ID)
 	})
 
-	service.registerModelsForAuth(auth)
+	service.registerModelsForAuth(context.Background(), auth)
 
 	models := registry.GetModelsForClient(auth.ID)
 	var imageModel *internalregistry.ModelInfo

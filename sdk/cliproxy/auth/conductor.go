@@ -15,14 +15,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	internalconfig "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/home"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
-	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	coreusage "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	internalconfig "github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/home"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/logging"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/thinking"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
+	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/pluginapi"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/sjson"
@@ -120,6 +121,16 @@ type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
 }
 
+// PluginScheduler lets dynamic plugins override auth selection for their providers.
+type PluginScheduler interface {
+	PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
+}
+
+// pluginSchedulerState allows the host to report whether any scheduler plugin is active.
+type pluginSchedulerState interface {
+	HasScheduler() bool
+}
+
 // Hook captures lifecycle callbacks for observing auth changes.
 type Hook interface {
 	// OnAuthRegistered fires when a new auth is registered.
@@ -151,6 +162,8 @@ type Manager struct {
 	mu        sync.RWMutex
 	auths     map[string]*Auth
 	scheduler *authScheduler
+	// pluginScheduler runs outside m.mu before falling back to native selection.
+	pluginScheduler PluginScheduler
 	// homeRuntimeAuths caches Home auths for long-lived websocket execution sessions.
 	homeRuntimeAuths map[string]map[string]*Auth
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
@@ -208,6 +221,32 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
+}
+
+// SetPluginScheduler installs the dynamic plugin scheduler used for plugin-owned providers.
+func (m *Manager) SetPluginScheduler(scheduler PluginScheduler) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.pluginScheduler = scheduler
+	m.mu.Unlock()
+}
+
+func (m *Manager) hasPluginScheduler() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	scheduler := m.pluginScheduler
+	m.mu.RUnlock()
+	if scheduler == nil {
+		return false
+	}
+	if state, ok := scheduler.(pluginSchedulerState); ok {
+		return state.HasScheduler()
+	}
+	return true
 }
 
 func isBuiltInSelector(selector Selector) bool {
@@ -761,6 +800,225 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 		return ""
 	}
 	return routeModel
+}
+
+func schedulerAttributeSensitive(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	normalized := strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(key)
+	compact := strings.NewReplacer("_", "", "-", "", ".", "", " ", "").Replace(key)
+	for _, fragment := range []string{
+		"api_key",
+		"apikey",
+		"token",
+		"secret",
+		"cookie",
+		"credential",
+		"password",
+		"storage",
+		"authorization",
+		"auth_header",
+		"proxy_url",
+	} {
+		if strings.Contains(key, fragment) || strings.Contains(normalized, fragment) || strings.Contains(compact, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func schedulerSafeAttributes(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(src))
+	for key, value := range src {
+		if schedulerAttributeSensitive(key) {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func cloneSchedulerAnyMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(src))
+	for key, value := range src {
+		if schedulerAttributeSensitive(key) {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func cloneAuthSlice(auths []*Auth) []*Auth {
+	if len(auths) == 0 {
+		return nil
+	}
+	out := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		out = append(out, auth.Clone())
+	}
+	return out
+}
+
+func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
+	if len(auths) == 0 {
+		return nil
+	}
+	out := make([]pluginapi.SchedulerAuthCandidate, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		out = append(out, pluginapi.SchedulerAuthCandidate{
+			ID:         auth.ID,
+			Provider:   strings.ToLower(strings.TrimSpace(auth.Provider)),
+			Priority:   authPriority(auth),
+			Status:     string(auth.Status),
+			Attributes: schedulerSafeAttributes(auth.Attributes),
+			Metadata:   cloneSchedulerAnyMap(auth.Metadata),
+		})
+	}
+	return out
+}
+
+func schedulerProviders(provider string, providers []string) []string {
+	out := make([]string, 0, len(providers)+1)
+	seen := make(map[string]struct{}, len(providers)+1)
+	addProvider := func(value string) {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" || value == "mixed" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	addProvider(provider)
+	for _, value := range providers {
+		addProvider(value)
+	}
+	return out
+}
+
+func schedulerOptions(opts cliproxyexecutor.Options) pluginapi.SchedulerOptions {
+	return pluginapi.SchedulerOptions{
+		Headers:  cloneHTTPHeader(opts.Headers),
+		Metadata: cloneSchedulerAnyMap(opts.Metadata),
+	}
+}
+
+func pickSchedulerAuthByID(candidates []*Auth, authID string) *Auth {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil
+	}
+	for _, candidate := range candidates {
+		if candidate != nil && candidate.ID == authID {
+			return candidate
+		}
+	}
+	return nil
+}
+
+func builtinSchedulerStrategy(delegate string) (schedulerStrategy, bool) {
+	switch strings.TrimSpace(delegate) {
+	case pluginapi.SchedulerBuiltinRoundRobin:
+		return schedulerStrategyRoundRobin, true
+	case pluginapi.SchedulerBuiltinFillFirst:
+		return schedulerStrategyFillFirst, true
+	default:
+		return schedulerStrategyCustom, false
+	}
+}
+
+func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedulerStrategy, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, bool, error) {
+	if m == nil || m.scheduler == nil {
+		return nil, false, nil
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	for {
+		var selected *Auth
+		var errPick error
+		if providerKey == "mixed" {
+			selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+			if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
+				m.syncScheduler()
+				selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+			}
+		} else {
+			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
+			if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
+				m.syncScheduler()
+				selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
+			}
+		}
+		if errPick != nil {
+			return nil, true, errPick
+		}
+		if selected == nil {
+			return nil, true, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		if disallowFreeAuth && isFreeCodexAuth(selected) {
+			if tried == nil {
+				tried = make(map[string]struct{})
+			}
+			tried[selected.ID] = struct{}{}
+			continue
+		}
+		return selected, true, nil
+	}
+}
+
+func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginScheduler, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, error) {
+	if scheduler == nil || len(candidates) == 0 {
+		return nil, false, nil
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	requestProvider := providerKey
+	if providerKey == "mixed" {
+		requestProvider = ""
+	}
+	req := pluginapi.SchedulerPickRequest{
+		Provider:   requestProvider,
+		Providers:  schedulerProviders(providerKey, providers),
+		Model:      model,
+		Stream:     opts.Stream,
+		Options:    schedulerOptions(opts),
+		Candidates: schedulerAuthCandidates(candidates),
+	}
+	resp, handled, errPick := scheduler.PickAuth(ctx, req)
+	if errPick != nil {
+		return nil, true, errPick
+	}
+	if !handled || !resp.Handled {
+		return nil, false, nil
+	}
+	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
+		return selected, true, nil
+	}
+
+	strategy, okStrategy := builtinSchedulerStrategy(resp.DelegateBuiltin)
+	if !okStrategy {
+		return nil, false, nil
+	}
+	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -3072,6 +3330,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	stickyRouteKey := stickyRouteKeyFromMetadata(opts.Metadata)
 
 	m.mu.RLock()
+	selector := m.selector
+	pluginScheduler := m.pluginScheduler
 	executor, okExecutor := m.executors[provider]
 	if !okExecutor {
 		m.mu.RUnlock()
@@ -3132,20 +3392,26 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 			return authCopy, executor, nil
 		}
 	}
-	selected, errPick := m.selector.Pick(ctx, provider, selectionArgForSelector(m.selector, model), opts, available)
+	available = cloneAuthSlice(available)
+	m.mu.RUnlock()
+
+	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available)
 	if errPick != nil {
-		m.mu.RUnlock()
 		return nil, nil, errPick
 	}
+	if !handled {
+		selected, errPick = selector.Pick(ctx, provider, selectionArgForSelector(selector, model), opts, available)
+		if errPick != nil {
+			return nil, nil, errPick
+		}
+	}
 	if selected == nil {
-		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
 	if m.scheduler != nil && bindingKey != "" {
 		m.scheduler.rememberLegacyStickyPick(bindingKey, selected.ID, now)
 	}
 	authCopy := selected.Clone()
-	m.mu.RUnlock()
 	if !selected.indexAssigned {
 		m.mu.Lock()
 		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
@@ -3163,7 +3429,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		return auth, exec, err
 	}
 
-	if !m.useSchedulerFastPath() {
+	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
@@ -3244,6 +3510,8 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 
 	m.mu.RLock()
+	selector := m.selector
+	pluginScheduler := m.pluginScheduler
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
 	// Always use base model name (without thinking suffix) for auth matching.
@@ -3315,26 +3583,31 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 			return authCopy, executor, providerKey, nil
 		}
 	}
-	selected, errPick := m.selector.Pick(ctx, "mixed", selectionArgForSelector(m.selector, model), opts, available)
+	available = cloneAuthSlice(available)
+	m.mu.RUnlock()
+
+	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available)
 	if errPick != nil {
-		m.mu.RUnlock()
 		return nil, nil, "", errPick
 	}
+	if !handled {
+		selected, errPick = selector.Pick(ctx, "mixed", selectionArgForSelector(selector, model), opts, available)
+		if errPick != nil {
+			return nil, nil, "", errPick
+		}
+	}
 	if selected == nil {
-		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
 	providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
-	executor, okExecutor := m.executors[providerKey]
+	executor, okExecutor := m.Executor(providerKey)
 	if !okExecutor {
-		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	if m.scheduler != nil && bindingKey != "" {
 		m.scheduler.rememberLegacyStickyPick(bindingKey, selected.ID, now)
 	}
 	authCopy := selected.Clone()
-	m.mu.RUnlock()
 	if !selected.indexAssigned {
 		m.mu.Lock()
 		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
@@ -3351,7 +3624,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
 
-	if !m.useSchedulerFastPath() {
+	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)

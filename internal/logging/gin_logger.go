@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )

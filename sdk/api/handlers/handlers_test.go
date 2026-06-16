@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	coreexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coreexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/net/context"
 )

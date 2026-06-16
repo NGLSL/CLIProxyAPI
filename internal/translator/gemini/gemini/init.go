@@ -1,9 +1,9 @@
 package gemini
 
 import (
-	. "github.com/NGLSL/CLIProxyAPI/v6/internal/constant"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/translator/translator"
+	. "github.com/NGLSL/CLIProxyAPI/v7/internal/constant"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/translator/translator"
 )
 
 // Register a no-op response translator and a request normalizer for Gemini→Gemini.

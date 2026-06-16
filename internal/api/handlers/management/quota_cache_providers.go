@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	codexauth "github.com/NGLSL/CLIProxyAPI/v6/internal/auth/codex"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	codexauth "github.com/NGLSL/CLIProxyAPI/v7/internal/auth/codex"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 const defaultAntigravityProjectID = "bamboo-precept-lgxtn"

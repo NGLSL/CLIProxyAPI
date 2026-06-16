@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	translatorcommon "github.com/NGLSL/CLIProxyAPI/v6/internal/translator/common"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
+	translatorcommon "github.com/NGLSL/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

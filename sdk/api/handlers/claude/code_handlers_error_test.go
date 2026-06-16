@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )

@@ -3,7 +3,7 @@ package diff
 import (
 	"testing"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 )
 
 func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {

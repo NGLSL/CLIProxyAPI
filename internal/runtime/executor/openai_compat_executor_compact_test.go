@@ -12,10 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/NGLSL/CLIProxyAPI/v6/sdk/translator"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/NGLSL/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 

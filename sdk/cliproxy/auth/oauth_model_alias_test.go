@@ -3,7 +3,7 @@ package auth
 import (
 	"testing"
 
-	internalconfig "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+	internalconfig "github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 )
 
 func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {

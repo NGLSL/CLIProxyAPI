@@ -4,7 +4,7 @@
 // embed CLIProxyAPI without importing internal packages.
 package config
 
-import internalconfig "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+import internalconfig "github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 
 type SDKConfig = internalconfig.SDKConfig
 
@@ -13,12 +13,19 @@ type Config = internalconfig.Config
 type StreamingConfig = internalconfig.StreamingConfig
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
-type AmpCode = internalconfig.AmpCode
 type OAuthModelAlias = internalconfig.OAuthModelAlias
 type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadFilterRule = internalconfig.PayloadFilterRule
 type PayloadModelRule = internalconfig.PayloadModelRule
+
+// PluginsConfig exposes plugin system configuration via the SDK surface so
+// external integrators can configure dynamic plugins without importing
+// internal packages.
+type PluginsConfig = internalconfig.PluginsConfig
+
+// PluginInstanceConfig exposes per-plugin instance configuration via the SDK.
+type PluginInstanceConfig = internalconfig.PluginInstanceConfig
 
 type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey

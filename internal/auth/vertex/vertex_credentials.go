@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/misc"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 

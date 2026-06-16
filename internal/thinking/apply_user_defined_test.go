@@ -3,9 +3,9 @@ package thinking_test
 import (
 	"testing"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking"
-	_ "github.com/NGLSL/CLIProxyAPI/v6/internal/thinking/provider/claude"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/thinking"
+	_ "github.com/NGLSL/CLIProxyAPI/v7/internal/thinking/provider/claude"
 	"github.com/tidwall/gjson"
 )
 

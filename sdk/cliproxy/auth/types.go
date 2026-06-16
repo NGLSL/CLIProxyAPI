@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	baseauth "github.com/NGLSL/CLIProxyAPI/v6/internal/auth"
+	baseauth "github.com/NGLSL/CLIProxyAPI/v7/internal/auth"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -92,7 +92,119 @@ type Auth struct {
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
+	// Success / Failed are lifetime success/failure counters used by the plugin
+	// host when surfacing credential health to plugins. They are maintained
+	// opportunistically and are not persisted to disk.
+	Success int64 `json:"-"`
+	Failed  int64 `json:"-"`
+
+	// recentRequests is an in-memory ring buffer of per-bucket success/failure
+	// counts used to produce RecentRequestsSnapshot. The plugin host reads this
+	// to report recent-traffic summaries for credentials under plugin control.
+	recentRequests recentRequestRing `json:"-"`
+
 	indexAssigned bool `json:"-"`
+}
+
+const (
+	// recentRequestBucketSeconds controls the wall-clock width of each bucket
+	// in the recent-requests ring buffer.
+	recentRequestBucketSeconds int64 = 10 * 60
+	// recentRequestBucketCount controls how many buckets the ring keeps. The
+	// window therefore spans recentRequestBucketSeconds * recentRequestBucketCount.
+	recentRequestBucketCount = 20
+)
+
+// recentRequestBucket is a single ring slot tracking per-interval counters.
+type recentRequestBucket struct {
+	bucketID int64
+	success  int64
+	failed   int64
+}
+
+// recentRequestRing is a fixed-size circular buffer of recentRequestBucket.
+type recentRequestRing struct {
+	buckets [recentRequestBucketCount]recentRequestBucket
+}
+
+// RecentRequestBucket is the exported snapshot entry returned by
+// RecentRequestsSnapshot. Time is a human-readable local-clock label so the
+// value can be displayed directly in management UIs.
+type RecentRequestBucket struct {
+	Time    string `json:"time"`
+	Success int64  `json:"success"`
+	Failed  int64  `json:"failed"`
+}
+
+// recordRecentRequest increments the success or failure counter for the bucket
+// containing now. When the bucket id advances past the slot's previous value
+// the slot is reset before incrementing so stale counters do not leak across
+// ring wraps.
+func (a *Auth) recordRecentRequest(now time.Time, success bool) {
+	if a == nil {
+		return
+	}
+	bucketID := recentRequestBucketID(now)
+	idx := recentRequestBucketIndex(bucketID)
+	bucket := &a.recentRequests.buckets[idx]
+	if bucket.bucketID != bucketID {
+		bucket.bucketID = bucketID
+		bucket.success = 0
+		bucket.failed = 0
+	}
+	if success {
+		bucket.success++
+		return
+	}
+	bucket.failed++
+}
+
+// RecentRequestsSnapshot returns the most recent bucket window ending at now.
+// Buckets that have no recorded activity for their interval are returned with
+// zero counters so callers always receive a fixed-length series.
+func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
+	out := make([]RecentRequestBucket, 0, recentRequestBucketCount)
+	if a == nil {
+		return out
+	}
+
+	currentBucketID := recentRequestBucketID(now)
+	for i := recentRequestBucketCount - 1; i >= 0; i-- {
+		bucketID := currentBucketID - int64(i)
+		idx := recentRequestBucketIndex(bucketID)
+		bucket := a.recentRequests.buckets[idx]
+		entry := RecentRequestBucket{
+			Time: formatRecentRequestBucketLabel(bucketID),
+		}
+		if bucket.bucketID == bucketID {
+			entry.Success = bucket.success
+			entry.Failed = bucket.failed
+		}
+		out = append(out, entry)
+	}
+
+	return out
+}
+
+func recentRequestBucketID(now time.Time) int64 {
+	if now.IsZero() {
+		return 0
+	}
+	return now.Unix() / recentRequestBucketSeconds
+}
+
+func recentRequestBucketIndex(bucketID int64) int {
+	mod := bucketID % int64(recentRequestBucketCount)
+	if mod < 0 {
+		mod += int64(recentRequestBucketCount)
+	}
+	return int(mod)
+}
+
+func formatRecentRequestBucketLabel(bucketID int64) string {
+	start := time.Unix(bucketID*recentRequestBucketSeconds, 0).In(time.Local)
+	end := start.Add(time.Duration(recentRequestBucketSeconds) * time.Second)
+	return start.Format("15:04") + "-" + end.Format("15:04")
 }
 
 // QuotaState contains limiter tracking data for a credential.

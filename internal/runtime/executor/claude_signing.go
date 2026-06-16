@@ -5,8 +5,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"

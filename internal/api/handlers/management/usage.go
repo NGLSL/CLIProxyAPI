@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/usage"
 	"github.com/gin-gonic/gin"
 )
 

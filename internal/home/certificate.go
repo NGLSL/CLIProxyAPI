@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 )
 
 const homeCertificateRequestTimeout = 30 * time.Second

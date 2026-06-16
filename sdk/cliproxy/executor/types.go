@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"net/url"
 
-	sdktranslator "github.com/NGLSL/CLIProxyAPI/v6/sdk/translator"
+	sdktranslator "github.com/NGLSL/CLIProxyAPI/v7/sdk/translator"
 )
 
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
@@ -58,8 +58,24 @@ type Options struct {
 	OriginalRequest []byte
 	// SourceFormat identifies the inbound schema.
 	SourceFormat sdktranslator.Format
+	// ResponseFormat identifies the downstream response schema expected by the
+	// caller. When empty, responses are produced in SourceFormat to preserve
+	// the historical single-protocol behaviour. Plugin-issued executions that
+	// cross-translate between protocols (e.g. openai -> claude) set this field
+	// so executor pipelines know which target schema to emit.
+	ResponseFormat sdktranslator.Format
 	// Metadata carries extra execution hints shared across selection and executors.
 	Metadata map[string]any
+}
+
+// ResponseFormatOrSource returns the response target format for an execution.
+// It resolves to ResponseFormat when set, falling back to SourceFormat so that
+// callers built against the historical single-protocol API keep working.
+func ResponseFormatOrSource(opts Options) sdktranslator.Format {
+	if opts.ResponseFormat != "" {
+		return opts.ResponseFormat
+	}
+	return opts.SourceFormat
 }
 
 // Response wraps either a full provider response or metadata for streaming flows.

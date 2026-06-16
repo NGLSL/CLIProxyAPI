@@ -7,13 +7,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/auth/codex"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/browser"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/auth/codex"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/browser"
 	// legacy client removed
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/misc"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
-	coreauth "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/misc"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
+	coreauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 

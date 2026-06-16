@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 type ineffectiveRefreshExecutor struct {

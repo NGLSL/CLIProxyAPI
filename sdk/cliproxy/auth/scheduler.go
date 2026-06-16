@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	internalconfig "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
-	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	internalconfig "github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
+	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 // schedulerStrategy identifies which built-in routing semantics the scheduler should apply.
@@ -20,6 +20,8 @@ type routingSourcePreference string
 
 // authSourceType identifies the origin layer of a synthesized auth.
 type authSourceType string
+
+const schedulerStrategyCurrent schedulerStrategy = -1
 
 const (
 	schedulerStrategyCustom schedulerStrategy = iota
@@ -365,6 +367,10 @@ func (s *authScheduler) removeAuth(authID string) {
 
 // pickSingle returns the next auth for a single provider/model request using scheduler state.
 func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
+	return s.pickSingleWithStrategy(ctx, provider, model, opts, tried, schedulerStrategyCurrent)
+}
+
+func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, error) {
 	if s == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -377,6 +383,9 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strategy == schedulerStrategyCurrent {
+		strategy = s.strategy
+	}
 	providerState := s.providers[providerKey]
 	if providerState == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -401,17 +410,19 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	}
 	activePredicate := s.activeSourcePredicateLocked([]*modelScheduler{shard}, preferWebsocket, predicate)
 	bindingKey := s.stickyBindingKey(providerKey, modelKey, stickyRouteKey)
-	if s.strategy == schedulerStrategyStickyRoundRobin {
+	if strategy == schedulerStrategyStickyRoundRobin {
 		if picked := s.pickStickyBoundLocked(shard, preferWebsocket, pinnedAuthID, bindingKey, activePredicate); picked != nil {
 			return picked, nil
 		}
 	}
-	strategy := s.strategy
-	if strategy == schedulerStrategyStickyRoundRobin {
-		strategy = schedulerStrategyRoundRobin
+	pickStrategy := strategy
+	if pickStrategy == schedulerStrategyStickyRoundRobin {
+		pickStrategy = schedulerStrategyRoundRobin
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, strategy, activePredicate); picked != nil {
-		s.maybeRememberStickyPickLocked(providerKey, modelKey, stickyRouteKey, picked.ID, now)
+	if picked := shard.pickReadyLocked(preferWebsocket, pickStrategy, activePredicate); picked != nil {
+		if strategy == s.strategy {
+			s.maybeRememberStickyPickLocked(providerKey, modelKey, stickyRouteKey, picked.ID, now)
+		}
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, activePredicate)
@@ -419,6 +430,10 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 
 // pickMixed returns the next auth and provider for a mixed-provider request.
 func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, string, error) {
+	return s.pickMixedWithStrategy(ctx, providers, model, opts, tried, schedulerStrategyCurrent)
+}
+
+func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, string, error) {
 	if s == nil {
 		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -428,7 +443,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	}
 	if len(normalized) == 1 {
 		providerKey := normalized[0]
-		picked, errPick := s.pickSingle(ctx, providerKey, model, opts, tried)
+		picked, errPick := s.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
 		if errPick != nil {
 			return nil, "", errPick
 		}
@@ -444,6 +459,9 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strategy == schedulerStrategyCurrent {
+		strategy = s.strategy
+	}
 	if pinnedAuthID != "" {
 		providerKey := s.authProviders[pinnedAuthID]
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
@@ -464,7 +482,11 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			_, ok := tried[pinnedAuthID]
 			return !ok
 		}
-		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+		pickStrategy := strategy
+		if pickStrategy == schedulerStrategyStickyRoundRobin {
+			pickStrategy = schedulerStrategyRoundRobin
+		}
+		if picked := shard.pickReadyLocked(false, pickStrategy, predicate); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -504,20 +526,20 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
-	if s.strategy == schedulerStrategyStickyRoundRobin {
+	if strategy == schedulerStrategyStickyRoundRobin {
 		bindingKey := s.stickyBindingProviderSetKey(normalized, modelKey, stickyRouteKey)
 		if picked, providerKey, ok := s.pickStickyBoundProviderLocked(candidateShards, normalized, bestPriority, bindingKey, activePredicate); ok {
 			return picked, providerKey, nil
 		}
 	}
 
-	if s.strategy == schedulerStrategyFillFirst {
+	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, activePredicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, activePredicate)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -576,7 +598,9 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			continue
 		}
 		s.mixedCursors[cursorKey] = slot + 1
-		s.maybeRememberMixedStickyPickLocked(normalized, modelKey, stickyRouteKey, picked.ID, now)
+		if strategy == s.strategy {
+			s.maybeRememberMixedStickyPickLocked(normalized, modelKey, stickyRouteKey, picked.ID, now)
+		}
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)

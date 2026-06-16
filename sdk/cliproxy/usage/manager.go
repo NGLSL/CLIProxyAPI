@@ -12,25 +12,55 @@ import (
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider            string
-	Model               string
-	Alias               string
-	APIKey              string
-	AuthID              string
-	AuthIndex           string
-	Source              string
-	ReasoningEffort     string
-	RequestedAt         time.Time
-	Latency             time.Duration
+	Provider string
+	// ExecutorType stores the concrete executor type that handled the request.
+	// Plugin sinks use this to attribute traffic to a specific executor
+	// implementation (e.g. "gemini-cli", "claude-cli", "codex-ws").
+	ExecutorType string
+	Model        string
+	Alias        string
+	APIKey       string
+	AuthID       string
+	AuthIndex    string
+	// AuthType stores the credential type that backed the request (e.g.
+	// "oauth", "api-key"). Empty means the value was not captured.
+	AuthType string
+	Source   string
+	// ReasoningEffort stores the translated upstream thinking level for request event logs.
+	ReasoningEffort string
+	// ServiceTier stores the client-requested service tier for request event logs.
+	ServiceTier string
+	RequestedAt time.Time
+	Latency     time.Duration
+	// FirstByteLatency / APIFirstByteLatency preserve the fork's historical
+	// TTFB measurements for the file-backed usage logger and are kept populated
+	// alongside TTFT below for compatibility with both fork and upstream sinks.
 	FirstByteLatency    time.Duration
 	APIFirstByteLatency time.Duration
-	Failed              bool
-	ChunkCount          int64
-	ResponseBytes       int64
-	APIResponseBytes    int64
-	Detail              Detail
+	// TTFT is the upstream-aligned time-to-first-token duration used by plugin
+	// usage sinks. It mirrors FirstByteLatency semantically.
+	TTFT time.Duration
+	// Failed flags a terminal failure for the request. Both Failed and Fail
+	// carry failure information: Failed is the boolean summary, Fail carries
+	// structured HTTP status/body detail when available.
+	Failed bool
+	Fail   Failure
+	// ChunkCount tracks the number of stream chunks observed for the request.
+	ChunkCount int64
+	// ResponseBytes / APIResponseBytes preserve the fork's byte counters.
+	ResponseBytes    int64
+	APIResponseBytes int64
+	Detail           Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
+}
+
+// Failure holds HTTP failure metadata for an upstream request attempt. It is
+// populated when a request fails with a structured upstream error so plugin
+// usage sinks can report status codes and response snippets.
+type Failure struct {
+	StatusCode int
+	Body       string
 }
 
 // Detail holds the token usage breakdown.
@@ -126,6 +156,11 @@ type Manager struct {
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
+	// named keeps the slice index of plugins registered via RegisterNamed so
+	// that re-registering under the same name replaces the existing plugin in
+	// place instead of appending duplicates. This is used by the plugin host
+	// to refresh usage plugins without growing the delivery list unbounded.
+	named map[string]int
 }
 
 // NewManager constructs a manager with a buffered queue.
@@ -241,6 +276,34 @@ func (m *Manager) Register(plugin Plugin) {
 	m.pluginsMu.Unlock()
 }
 
+// RegisterNamed registers or replaces a plugin by name. When name already
+// exists the previously-registered plugin is replaced in place so the delivery
+// order is preserved; otherwise the plugin is appended. Plugins registered by
+// name can be refreshed (e.g. by the plugin host when reloading a plugin)
+// without producing duplicates in the dispatch list.
+func (m *Manager) RegisterNamed(name string, plugin Plugin) {
+	if m == nil || plugin == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+
+	m.pluginsMu.Lock()
+	if m.named == nil {
+		m.named = make(map[string]int)
+	}
+	if index, exists := m.named[name]; exists && index >= 0 && index < len(m.plugins) {
+		m.plugins[index] = plugin
+		m.pluginsMu.Unlock()
+		return
+	}
+	m.named[name] = len(m.plugins)
+	m.plugins = append(m.plugins, plugin)
+	m.pluginsMu.Unlock()
+}
+
 // Publish enqueues a usage record for processing. If no plugin is registered
 // the record will be discarded downstream.
 func (m *Manager) Publish(ctx context.Context, record Record) {
@@ -308,6 +371,11 @@ func DefaultManager() *Manager { return defaultManager }
 
 // RegisterPlugin registers a plugin on the default manager.
 func RegisterPlugin(plugin Plugin) { DefaultManager().Register(plugin) }
+
+// RegisterNamedPlugin registers or replaces a named plugin on the default
+// manager. The plugin host uses this to keep the delivery list stable across
+// plugin reloads.
+func RegisterNamedPlugin(name string, plugin Plugin) { DefaultManager().RegisterNamed(name, plugin) }
 
 // PublishRecord publishes a record using the default manager.
 func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publish(ctx, record) }

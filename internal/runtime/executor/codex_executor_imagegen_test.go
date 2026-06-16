@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/runtime/executor/helps"
-	coreusage "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	coreusage "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 )
 

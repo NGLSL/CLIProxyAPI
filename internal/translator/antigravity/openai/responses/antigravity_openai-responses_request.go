@@ -1,8 +1,8 @@
 package responses
 
 import (
-	. "github.com/NGLSL/CLIProxyAPI/v6/internal/translator/antigravity/gemini"
-	. "github.com/NGLSL/CLIProxyAPI/v6/internal/translator/gemini/openai/responses"
+	. "github.com/NGLSL/CLIProxyAPI/v7/internal/translator/antigravity/gemini"
+	. "github.com/NGLSL/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
 )
 
 func ConvertOpenAIResponsesRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) []byte {

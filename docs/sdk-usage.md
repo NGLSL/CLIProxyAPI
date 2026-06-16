@@ -5,7 +5,7 @@ The `sdk/cliproxy` module exposes the proxy as a reusable Go library so external
 ## Install & Import
 
 ```bash
-go get github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy
+go get github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy
 ```
 
 ```go
@@ -14,8 +14,8 @@ import (
     "errors"
     "time"
 
-    "github.com/NGLSL/CLIProxyAPI/v6/internal/config"
-    "github.com/NGLSL/CLIProxyAPI/v6/sdk/cliproxy"
+    "github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+    "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy"
 )
 ```
 

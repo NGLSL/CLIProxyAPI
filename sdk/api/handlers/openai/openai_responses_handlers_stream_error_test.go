@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/NGLSL/CLIProxyAPI/v6/sdk/api/handlers"
-	sdkconfig "github.com/NGLSL/CLIProxyAPI/v6/sdk/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/api/handlers"
+	sdkconfig "github.com/NGLSL/CLIProxyAPI/v7/sdk/config"
 	"github.com/gin-gonic/gin"
 )
 

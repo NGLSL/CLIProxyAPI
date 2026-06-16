@@ -13,9 +13,9 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/registry"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/thinking"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/thinking"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"

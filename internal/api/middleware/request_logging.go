@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/logging"
-	internalusage "github.com/NGLSL/CLIProxyAPI/v6/internal/usage"
-	"github.com/NGLSL/CLIProxyAPI/v6/internal/util"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/logging"
+	internalusage "github.com/NGLSL/CLIProxyAPI/v7/internal/usage"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 )
