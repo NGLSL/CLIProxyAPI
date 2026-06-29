@@ -1205,7 +1205,7 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 		model := entry.Models[i]
 		model.Name = strings.TrimSpace(model.Name)
 		model.Alias = strings.TrimSpace(model.Alias)
-		if model.Name == "" || model.Alias == "" {
+		if model.Name == "" {
 			continue
 		}
 		normalized = append(normalized, model)
