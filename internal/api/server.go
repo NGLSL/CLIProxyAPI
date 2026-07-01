@@ -736,7 +736,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
-		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
+		// OAuth 回调必须使用上方直接挂到 engine 的路由，避免被管理后台鉴权中间件拦截；
+		// 这里不要重复注册 POST /oauth-callback，否则 Gin 会因为路径冲突在启动阶段 panic。
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
 }
