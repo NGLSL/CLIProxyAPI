@@ -69,6 +69,7 @@ type RequestStatistics struct {
 	successCount  int64
 	failureCount  int64
 	totalTokens   int64
+	tokenTotals   TokenStats
 
 	apis map[string]*apiStats
 
@@ -84,6 +85,7 @@ type apiStats struct {
 	SuccessCount  int64
 	FailureCount  int64
 	TotalTokens   int64
+	TokenTotals   TokenStats
 	Models        map[string]*modelStats
 }
 
@@ -93,6 +95,7 @@ type modelStats struct {
 	SuccessCount  int64
 	FailureCount  int64
 	TotalTokens   int64
+	TokenTotals   TokenStats
 	Details       []RequestDetail
 }
 
@@ -126,10 +129,11 @@ type TokenStats struct {
 
 // StatisticsSnapshot represents an immutable view of the aggregated metrics.
 type StatisticsSnapshot struct {
-	TotalRequests int64 `json:"total_requests"`
-	SuccessCount  int64 `json:"success_count"`
-	FailureCount  int64 `json:"failure_count"`
-	TotalTokens   int64 `json:"total_tokens"`
+	TotalRequests int64      `json:"total_requests"`
+	SuccessCount  int64      `json:"success_count"`
+	FailureCount  int64      `json:"failure_count"`
+	TotalTokens   int64      `json:"total_tokens"`
+	Tokens        TokenStats `json:"tokens"`
 
 	APIs map[string]APISnapshot `json:"apis"`
 
@@ -145,6 +149,7 @@ type APISnapshot struct {
 	SuccessCount  int64                    `json:"success_count"`
 	FailureCount  int64                    `json:"failure_count"`
 	TotalTokens   int64                    `json:"total_tokens"`
+	Tokens        TokenStats               `json:"tokens"`
 	Models        map[string]ModelSnapshot `json:"models"`
 }
 
@@ -154,6 +159,7 @@ type ModelSnapshot struct {
 	SuccessCount  int64           `json:"success_count"`
 	FailureCount  int64           `json:"failure_count"`
 	TotalTokens   int64           `json:"total_tokens"`
+	Tokens        TokenStats      `json:"tokens"`
 	Details       []RequestDetail `json:"details"`
 }
 
@@ -186,6 +192,7 @@ func (s *RequestStatistics) Reset() {
 	s.successCount = 0
 	s.failureCount = 0
 	s.totalTokens = 0
+	s.tokenTotals = TokenStats{}
 	s.apis = make(map[string]*apiStats)
 	s.requestsByDay = make(map[string]int64)
 	s.requestsByHour = make(map[int]int64)
@@ -235,6 +242,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.failureCount++
 	}
 	s.totalTokens += totalTokens
+	s.tokenTotals = addTokenStats(s.tokenTotals, detail)
 
 	stats, ok := s.apis[statsKey]
 	if !ok {
@@ -271,6 +279,7 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 		stats.SuccessCount++
 	}
 	stats.TotalTokens += detail.Tokens.TotalTokens
+	stats.TokenTotals = addTokenStats(stats.TokenTotals, detail.Tokens)
 	modelStatsValue, ok := stats.Models[model]
 	if !ok {
 		modelStatsValue = &modelStats{}
@@ -283,6 +292,7 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 		modelStatsValue.SuccessCount++
 	}
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
+	modelStatsValue.TokenTotals = addTokenStats(modelStatsValue.TokenTotals, detail.Tokens)
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
 	if len(modelStatsValue.Details) > maxRequestDetailsPerModel {
 		modelStatsValue.Details = modelStatsValue.Details[len(modelStatsValue.Details)-maxRequestDetailsPerModel:]
@@ -303,6 +313,7 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	result.SuccessCount = s.successCount
 	result.FailureCount = s.failureCount
 	result.TotalTokens = s.totalTokens
+	result.Tokens = normaliseTokenStats(s.tokenTotals)
 
 	result.APIs = make(map[string]APISnapshot, len(s.apis))
 	for apiName, stats := range s.apis {
@@ -311,6 +322,7 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			SuccessCount:  stats.SuccessCount,
 			FailureCount:  stats.FailureCount,
 			TotalTokens:   stats.TotalTokens,
+			Tokens:        normaliseTokenStats(stats.TokenTotals),
 			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
 		}
 		for modelName, modelStatsValue := range stats.Models {
@@ -321,6 +333,7 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 				SuccessCount:  modelStatsValue.SuccessCount,
 				FailureCount:  modelStatsValue.FailureCount,
 				TotalTokens:   modelStatsValue.TotalTokens,
+				Tokens:        normaliseTokenStats(modelStatsValue.TokenTotals),
 				Details:       requestDetails,
 			}
 		}
@@ -379,6 +392,7 @@ func (s *RequestStatistics) RestoreSnapshot(snapshot StatisticsSnapshot) Restore
 	s.successCount = restored.successCount
 	s.failureCount = restored.failureCount
 	s.totalTokens = restored.totalTokens
+	s.tokenTotals = restored.tokenTotals
 	s.apis = restored.apis
 	s.requestsByDay = restored.requestsByDay
 	s.requestsByHour = restored.requestsByHour
@@ -395,6 +409,7 @@ type restoredStatistics struct {
 	successCount  int64
 	failureCount  int64
 	totalTokens   int64
+	tokenTotals   TokenStats
 	detailCount   int64
 
 	apis map[string]*apiStats
@@ -421,6 +436,7 @@ func buildRestoredStatistics(snapshot StatisticsSnapshot) restoredStatistics {
 
 	var apiTotalRequests int64
 	var apiTotalTokens int64
+	var apiTokenTotals TokenStats
 	var apiSuccessCount int64
 	var apiFailureCount int64
 
@@ -433,6 +449,7 @@ func buildRestoredStatistics(snapshot StatisticsSnapshot) restoredStatistics {
 		api := &apiStats{Models: make(map[string]*modelStats)}
 		var modelTotalRequests int64
 		var modelTotalTokens int64
+		var modelTokenTotals TokenStats
 		var modelSuccessCount int64
 		var modelFailureCount int64
 
@@ -442,11 +459,16 @@ func buildRestoredStatistics(snapshot StatisticsSnapshot) restoredStatistics {
 				modelName = "unknown"
 			}
 
-			modelStatsValue, detailRequests, detailTokens, successCount, failureCount := restoreModelSnapshot(modelSnapshot, detailRequestsByDay, detailRequestsByHour, detailTokensByDay, detailTokensByHour)
+			modelStatsValue, detailRequests, detailTokens, detailTokenTotals, successCount, failureCount := restoreModelSnapshot(modelSnapshot, detailRequestsByDay, detailRequestsByHour, detailTokensByDay, detailTokensByHour)
 			restored.detailCount += int64(len(modelStatsValue.Details))
 
 			modelStatsValue.TotalRequests = maxNonNegative(modelSnapshot.TotalRequests, detailRequests)
 			modelStatsValue.TotalTokens = maxNonNegative(modelSnapshot.TotalTokens, detailTokens)
+			modelStatsValue.TokenTotals = normalizeRestoredTokenTotals(
+				modelSnapshot.Tokens,
+				detailTokenTotals,
+				modelStatsValue.TotalTokens,
+			)
 			// 新快照会持久化模型级成功/失败；老快照没有该字段时，继续从保留明细推导。
 			// 如果明细因为窗口裁剪少于总请求数，缺口按成功请求补齐，避免恢复后成功率被裁剪窗口拖低。
 			modelStatsValue.SuccessCount, modelStatsValue.FailureCount = normalizeOutcomeCounts(
@@ -463,12 +485,14 @@ func buildRestoredStatistics(snapshot StatisticsSnapshot) restoredStatistics {
 
 			modelTotalRequests += modelStatsValue.TotalRequests
 			modelTotalTokens += modelStatsValue.TotalTokens
+			modelTokenTotals = addTokenStats(modelTokenTotals, modelStatsValue.TokenTotals)
 			modelSuccessCount += modelStatsValue.SuccessCount
 			modelFailureCount += modelStatsValue.FailureCount
 		}
 
 		api.TotalRequests = maxNonNegative(apiSnapshot.TotalRequests, modelTotalRequests)
 		api.TotalTokens = maxNonNegative(apiSnapshot.TotalTokens, modelTotalTokens)
+		api.TokenTotals = normalizeRestoredTokenTotals(apiSnapshot.Tokens, modelTokenTotals, api.TotalTokens)
 		api.SuccessCount, api.FailureCount = normalizeOutcomeCounts(
 			apiSnapshot.SuccessCount,
 			apiSnapshot.FailureCount,
@@ -483,12 +507,14 @@ func buildRestoredStatistics(snapshot StatisticsSnapshot) restoredStatistics {
 
 		apiTotalRequests += api.TotalRequests
 		apiTotalTokens += api.TotalTokens
+		apiTokenTotals = addTokenStats(apiTokenTotals, api.TokenTotals)
 		apiSuccessCount += api.SuccessCount
 		apiFailureCount += api.FailureCount
 	}
 
 	restored.totalRequests = maxNonNegative(snapshot.TotalRequests, apiTotalRequests)
 	restored.totalTokens = maxNonNegative(snapshot.TotalTokens, apiTotalTokens)
+	restored.tokenTotals = normalizeRestoredTokenTotals(snapshot.Tokens, apiTokenTotals, restored.totalTokens)
 	restored.successCount, restored.failureCount = normalizeOutcomeCounts(
 		snapshot.SuccessCount,
 		snapshot.FailureCount,
@@ -525,16 +551,45 @@ func normalizeOutcomeCounts(success, failure, totalRequests, fallbackSuccess, fa
 	return success, failure
 }
 
+func normalizeRestoredTokenTotals(tokens, fallback TokenStats, totalTokens int64) TokenStats {
+	normalized := normaliseTokenStats(tokens)
+	normalized.InputTokens = normaliseNonNegative(normalized.InputTokens)
+	normalized.OutputTokens = normaliseNonNegative(normalized.OutputTokens)
+	normalized.ReasoningTokens = normaliseNonNegative(normalized.ReasoningTokens)
+	normalized.CachedTokens = normaliseNonNegative(normalized.CachedTokens)
+	normalized.CacheReadTokens = normaliseNonNegative(normalized.CacheReadTokens)
+	normalized.CacheCreationTokens = normaliseNonNegative(normalized.CacheCreationTokens)
+	normalized.TotalTokens = normaliseNonNegative(normalized.TotalTokens)
+	if normalizedTotalTokenFields(normalized) == 0 && normalizedTotalTokenFields(fallback) > 0 {
+		normalized = normaliseTokenStats(fallback)
+	}
+	if normalized.TotalTokens < normaliseNonNegative(totalTokens) {
+		normalized.TotalTokens = normaliseNonNegative(totalTokens)
+	}
+	return normalized
+}
+
+func normalizedTotalTokenFields(tokens TokenStats) int64 {
+	return normaliseNonNegative(tokens.InputTokens) +
+		normaliseNonNegative(tokens.OutputTokens) +
+		normaliseNonNegative(tokens.ReasoningTokens) +
+		normaliseNonNegative(tokens.CachedTokens) +
+		normaliseNonNegative(tokens.CacheReadTokens) +
+		normaliseNonNegative(tokens.CacheCreationTokens) +
+		normaliseNonNegative(tokens.TotalTokens)
+}
+
 func restoreModelSnapshot(
 	modelSnapshot ModelSnapshot,
 	detailRequestsByDay map[string]int64,
 	detailRequestsByHour map[int]int64,
 	detailTokensByDay map[string]int64,
 	detailTokensByHour map[int]int64,
-) (*modelStats, int64, int64, int64, int64) {
+) (*modelStats, int64, int64, TokenStats, int64, int64) {
 	details := make([]RequestDetail, 0, len(modelSnapshot.Details))
 	var detailRequests int64
 	var detailTokens int64
+	var detailTokenTotals TokenStats
 	var successCount int64
 	var failureCount int64
 
@@ -544,6 +599,7 @@ func restoreModelSnapshot(
 		details = append(details, detail)
 		detailRequests++
 		detailTokens += tokens
+		detailTokenTotals = addTokenStats(detailTokenTotals, detail.Tokens)
 		if detail.Failed {
 			failureCount++
 		} else {
@@ -562,7 +618,7 @@ func restoreModelSnapshot(
 		details = details[len(details)-maxRequestDetailsPerModel:]
 	}
 
-	return &modelStats{Details: details}, detailRequests, detailTokens, successCount, failureCount
+	return &modelStats{Details: details}, detailRequests, detailTokens, detailTokenTotals, successCount, failureCount
 }
 
 func normaliseRestoredDetail(detail RequestDetail) RequestDetail {
@@ -724,6 +780,7 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 		s.successCount++
 	}
 	s.totalTokens += totalTokens
+	s.tokenTotals = addTokenStats(s.tokenTotals, detail.Tokens)
 
 	s.updateAPIStats(stats, modelName, detail)
 
@@ -826,6 +883,19 @@ func normaliseTokenStats(tokens TokenStats) TokenStats {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens + tokens.CacheReadTokens + tokens.CacheCreationTokens
 	}
 	return tokens
+}
+
+func addTokenStats(left, right TokenStats) TokenStats {
+	right = normaliseTokenStats(right)
+	return TokenStats{
+		InputTokens:         normaliseNonNegative(left.InputTokens) + normaliseNonNegative(right.InputTokens),
+		OutputTokens:        normaliseNonNegative(left.OutputTokens) + normaliseNonNegative(right.OutputTokens),
+		ReasoningTokens:     normaliseNonNegative(left.ReasoningTokens) + normaliseNonNegative(right.ReasoningTokens),
+		CachedTokens:        normaliseNonNegative(left.CachedTokens) + normaliseNonNegative(right.CachedTokens),
+		CacheReadTokens:     normaliseNonNegative(left.CacheReadTokens) + normaliseNonNegative(right.CacheReadTokens),
+		CacheCreationTokens: normaliseNonNegative(left.CacheCreationTokens) + normaliseNonNegative(right.CacheCreationTokens),
+		TotalTokens:         normaliseNonNegative(left.TotalTokens) + normaliseNonNegative(right.TotalTokens),
+	}
 }
 
 func normaliseLatency(latency time.Duration) int64 {

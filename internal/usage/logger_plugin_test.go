@@ -172,13 +172,19 @@ func TestRequestStatisticsRecordTrimsDetailsButKeepsAggregateTotals(t *testing.T
 	baseTime := time.Date(2026, 3, 21, 8, 0, 0, 0, time.UTC)
 
 	var expectedTotalTokens int64
+	var expectedCachedTokens int64
+	var expectedReasoningTokens int64
 	var expectedSuccessCount int64
 	var expectedFailureCount int64
 
 	for i := 0; i < maxRequestDetailsPerModel+25; i++ {
 		failed := i%3 == 0
 		tokens := int64(i + 1)
+		cachedTokens := int64(i % 5)
+		reasoningTokens := int64(i % 7)
 		expectedTotalTokens += tokens
+		expectedCachedTokens += cachedTokens
+		expectedReasoningTokens += reasoningTokens
 		if failed {
 			expectedFailureCount++
 		} else {
@@ -193,8 +199,10 @@ func TestRequestStatisticsRecordTrimsDetailsButKeepsAggregateTotals(t *testing.T
 			Source:      fmt.Sprintf("source-%d", i),
 			AuthIndex:   fmt.Sprintf("auth-%d", i),
 			Detail: coreusage.Detail{
-				InputTokens: tokens,
-				TotalTokens: tokens,
+				InputTokens:     tokens,
+				CachedTokens:    cachedTokens,
+				ReasoningTokens: reasoningTokens,
+				TotalTokens:     tokens,
 			},
 		})
 	}
@@ -234,12 +242,24 @@ func TestRequestStatisticsRecordTrimsDetailsButKeepsAggregateTotals(t *testing.T
 	if snapshot.TotalTokens != expectedTotalTokens {
 		t.Fatalf("total tokens = %d, want %d", snapshot.TotalTokens, expectedTotalTokens)
 	}
+	if snapshot.Tokens.CachedTokens != expectedCachedTokens {
+		t.Fatalf("cached tokens = %d, want %d", snapshot.Tokens.CachedTokens, expectedCachedTokens)
+	}
+	if snapshot.Tokens.ReasoningTokens != expectedReasoningTokens {
+		t.Fatalf("reasoning tokens = %d, want %d", snapshot.Tokens.ReasoningTokens, expectedReasoningTokens)
+	}
 
 	if apiSnapshot.TotalRequests != int64(maxRequestDetailsPerModel+25) {
 		t.Fatalf("api total requests = %d, want %d", apiSnapshot.TotalRequests, maxRequestDetailsPerModel+25)
 	}
 	if apiSnapshot.TotalTokens != expectedTotalTokens {
 		t.Fatalf("api total tokens = %d, want %d", apiSnapshot.TotalTokens, expectedTotalTokens)
+	}
+	if apiSnapshot.Tokens.CachedTokens != expectedCachedTokens {
+		t.Fatalf("api cached tokens = %d, want %d", apiSnapshot.Tokens.CachedTokens, expectedCachedTokens)
+	}
+	if apiSnapshot.Tokens.ReasoningTokens != expectedReasoningTokens {
+		t.Fatalf("api reasoning tokens = %d, want %d", apiSnapshot.Tokens.ReasoningTokens, expectedReasoningTokens)
 	}
 	if apiSnapshot.SuccessCount != expectedSuccessCount {
 		t.Fatalf("api success count = %d, want %d", apiSnapshot.SuccessCount, expectedSuccessCount)
@@ -252,6 +272,12 @@ func TestRequestStatisticsRecordTrimsDetailsButKeepsAggregateTotals(t *testing.T
 	}
 	if modelSnapshot.TotalTokens != expectedTotalTokens {
 		t.Fatalf("model total tokens = %d, want %d", modelSnapshot.TotalTokens, expectedTotalTokens)
+	}
+	if modelSnapshot.Tokens.CachedTokens != expectedCachedTokens {
+		t.Fatalf("model cached tokens = %d, want %d", modelSnapshot.Tokens.CachedTokens, expectedCachedTokens)
+	}
+	if modelSnapshot.Tokens.ReasoningTokens != expectedReasoningTokens {
+		t.Fatalf("model reasoning tokens = %d, want %d", modelSnapshot.Tokens.ReasoningTokens, expectedReasoningTokens)
 	}
 	if modelSnapshot.SuccessCount != expectedSuccessCount {
 		t.Fatalf("model success count = %d, want %d", modelSnapshot.SuccessCount, expectedSuccessCount)
@@ -266,13 +292,19 @@ func TestRequestStatisticsRestoreSnapshotKeepsAggregateTotalsBeyondDetailWindow(
 	baseTime := time.Date(2026, 3, 21, 8, 0, 0, 0, time.UTC)
 
 	var expectedTotalTokens int64
+	var expectedCachedTokens int64
+	var expectedReasoningTokens int64
 	var expectedSuccessCount int64
 	var expectedFailureCount int64
 
 	for i := 0; i < maxRequestDetailsPerModel+25; i++ {
 		failed := i%3 == 0
 		tokens := int64(i + 1)
+		cachedTokens := int64(i % 5)
+		reasoningTokens := int64(i % 7)
 		expectedTotalTokens += tokens
+		expectedCachedTokens += cachedTokens
+		expectedReasoningTokens += reasoningTokens
 		if failed {
 			expectedFailureCount++
 		} else {
@@ -287,8 +319,10 @@ func TestRequestStatisticsRestoreSnapshotKeepsAggregateTotalsBeyondDetailWindow(
 			Source:      fmt.Sprintf("restore-source-%d", i),
 			AuthIndex:   fmt.Sprintf("restore-auth-%d", i),
 			Detail: coreusage.Detail{
-				InputTokens: tokens,
-				TotalTokens: tokens,
+				InputTokens:     tokens,
+				CachedTokens:    cachedTokens,
+				ReasoningTokens: reasoningTokens,
+				TotalTokens:     tokens,
 			},
 		})
 	}
@@ -319,6 +353,12 @@ func TestRequestStatisticsRestoreSnapshotKeepsAggregateTotalsBeyondDetailWindow(
 	if restored.TotalTokens != expectedTotalTokens {
 		t.Fatalf("total tokens = %d, want %d", restored.TotalTokens, expectedTotalTokens)
 	}
+	if restored.Tokens.CachedTokens != expectedCachedTokens {
+		t.Fatalf("cached tokens = %d, want %d", restored.Tokens.CachedTokens, expectedCachedTokens)
+	}
+	if restored.Tokens.ReasoningTokens != expectedReasoningTokens {
+		t.Fatalf("reasoning tokens = %d, want %d", restored.Tokens.ReasoningTokens, expectedReasoningTokens)
+	}
 	if restored.RequestsByDay["2026-03-21"] != int64(maxRequestDetailsPerModel+25) {
 		t.Fatalf("requests by day = %d, want %d", restored.RequestsByDay["2026-03-21"], maxRequestDetailsPerModel+25)
 	}
@@ -331,6 +371,12 @@ func TestRequestStatisticsRestoreSnapshotKeepsAggregateTotalsBeyondDetailWindow(
 	if apiSnapshot.TotalTokens != expectedTotalTokens {
 		t.Fatalf("api total tokens = %d, want %d", apiSnapshot.TotalTokens, expectedTotalTokens)
 	}
+	if apiSnapshot.Tokens.CachedTokens != expectedCachedTokens {
+		t.Fatalf("api cached tokens = %d, want %d", apiSnapshot.Tokens.CachedTokens, expectedCachedTokens)
+	}
+	if apiSnapshot.Tokens.ReasoningTokens != expectedReasoningTokens {
+		t.Fatalf("api reasoning tokens = %d, want %d", apiSnapshot.Tokens.ReasoningTokens, expectedReasoningTokens)
+	}
 	if apiSnapshot.SuccessCount != expectedSuccessCount {
 		t.Fatalf("api success count = %d, want %d", apiSnapshot.SuccessCount, expectedSuccessCount)
 	}
@@ -342,6 +388,12 @@ func TestRequestStatisticsRestoreSnapshotKeepsAggregateTotalsBeyondDetailWindow(
 	}
 	if modelSnapshot.TotalTokens != expectedTotalTokens {
 		t.Fatalf("model total tokens = %d, want %d", modelSnapshot.TotalTokens, expectedTotalTokens)
+	}
+	if modelSnapshot.Tokens.CachedTokens != expectedCachedTokens {
+		t.Fatalf("model cached tokens = %d, want %d", modelSnapshot.Tokens.CachedTokens, expectedCachedTokens)
+	}
+	if modelSnapshot.Tokens.ReasoningTokens != expectedReasoningTokens {
+		t.Fatalf("model reasoning tokens = %d, want %d", modelSnapshot.Tokens.ReasoningTokens, expectedReasoningTokens)
 	}
 	if modelSnapshot.SuccessCount != expectedSuccessCount {
 		t.Fatalf("model success count = %d, want %d", modelSnapshot.SuccessCount, expectedSuccessCount)

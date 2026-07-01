@@ -773,6 +773,7 @@ func mergeUsageSnapshots(base, delta internalusage.StatisticsSnapshot) internalu
 		SuccessCount:   base.SuccessCount + delta.SuccessCount,
 		FailureCount:   base.FailureCount + delta.FailureCount,
 		TotalTokens:    base.TotalTokens + delta.TotalTokens,
+		Tokens:         addUsageTokenStats(base.Tokens, delta.Tokens),
 		APIs:           make(map[string]internalusage.APISnapshot, len(base.APIs)+len(delta.APIs)),
 		RequestsByDay:  addUsageMaps(base.RequestsByDay, delta.RequestsByDay),
 		RequestsByHour: addUsageMaps(base.RequestsByHour, delta.RequestsByHour),
@@ -802,6 +803,7 @@ func cloneUsageAPISnapshot(snapshot internalusage.APISnapshot) internalusage.API
 		SuccessCount:  snapshot.SuccessCount,
 		FailureCount:  snapshot.FailureCount,
 		TotalTokens:   snapshot.TotalTokens,
+		Tokens:        snapshot.Tokens,
 		Models:        make(map[string]internalusage.ModelSnapshot, len(snapshot.Models)),
 	}
 	for modelName, modelSnapshot := range snapshot.Models {
@@ -816,6 +818,7 @@ func mergeUsageAPISnapshots(base, delta internalusage.APISnapshot) internalusage
 	merged.SuccessCount += delta.SuccessCount
 	merged.FailureCount += delta.FailureCount
 	merged.TotalTokens += delta.TotalTokens
+	merged.Tokens = addUsageTokenStats(merged.Tokens, delta.Tokens)
 	if merged.Models == nil {
 		merged.Models = make(map[string]internalusage.ModelSnapshot, len(delta.Models))
 	}
@@ -831,6 +834,7 @@ func cloneUsageModelSnapshot(snapshot internalusage.ModelSnapshot) internalusage
 		SuccessCount:  snapshot.SuccessCount,
 		FailureCount:  snapshot.FailureCount,
 		TotalTokens:   snapshot.TotalTokens,
+		Tokens:        snapshot.Tokens,
 		Details:       copyUsageDetails(snapshot.Details),
 	}
 }
@@ -841,7 +845,20 @@ func mergeUsageModelSnapshots(base, delta internalusage.ModelSnapshot) internalu
 		SuccessCount:  base.SuccessCount + delta.SuccessCount,
 		FailureCount:  base.FailureCount + delta.FailureCount,
 		TotalTokens:   base.TotalTokens + delta.TotalTokens,
+		Tokens:        addUsageTokenStats(base.Tokens, delta.Tokens),
 		Details:       mergeUsageDetails(base.Details, delta.Details),
+	}
+}
+
+func addUsageTokenStats(base, delta internalusage.TokenStats) internalusage.TokenStats {
+	return internalusage.TokenStats{
+		InputTokens:         base.InputTokens + delta.InputTokens,
+		OutputTokens:        base.OutputTokens + delta.OutputTokens,
+		ReasoningTokens:     base.ReasoningTokens + delta.ReasoningTokens,
+		CachedTokens:        base.CachedTokens + delta.CachedTokens,
+		CacheReadTokens:     base.CacheReadTokens + delta.CacheReadTokens,
+		CacheCreationTokens: base.CacheCreationTokens + delta.CacheCreationTokens,
+		TotalTokens:         base.TotalTokens + delta.TotalTokens,
 	}
 }
 
