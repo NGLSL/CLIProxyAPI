@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
-	internallogging "github.com/NGLSL/CLIProxyAPI/v7/internal/logging"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/logging"
 	internalusage "github.com/NGLSL/CLIProxyAPI/v7/internal/usage"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
 	"github.com/gin-gonic/gin"
@@ -46,6 +46,7 @@ type upstreamAttempt struct {
 	index                int
 	request              string
 	response             *strings.Builder
+	responseSource       *logging.FileBodySource
 	responseIntroWritten bool
 	statusWritten        bool
 	headersWritten       bool
@@ -59,6 +60,10 @@ type aggregatedAPIResponse struct {
 	buffer                   bytes.Buffer
 	lastAttemptIndex         int
 	syntheticTrailingNewline bool
+}
+
+func requestLogCaptureEnabled(cfg *config.Config) bool {
+	return cfg != nil && cfg.RequestLog && !cfg.CommercialMode
 }
 
 func (a *aggregatedAPIResponse) appendAttemptDelta(attemptIndex int, delta string, underlyingEndsWithNewline bool) {
@@ -209,26 +214,56 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	builder.WriteString("\nHeaders:\n")
 	writeHeaders(builder, info.Headers)
 	builder.WriteString("\nBody:\n")
-	if len(info.Body) > 0 {
-		builder.WriteString(string(info.Body))
+
+	requestText := ""
+	if source, ok := apiRequestSource(ginCtx); ok {
+		if errWrite := source.AppendBytes([]byte(builder.String())); errWrite == nil {
+			if len(info.Body) > 0 {
+				if errBody := source.AppendBytes(info.Body); errBody != nil {
+					log.WithError(errBody).Warn("failed to append api request body log part")
+				}
+			} else if errEmpty := source.AppendBytes([]byte("<empty>")); errEmpty != nil {
+				log.WithError(errEmpty).Warn("failed to append empty api request log part")
+			}
+			if errEnd := source.AppendBytes([]byte("\n\n")); errEnd != nil {
+				log.WithError(errEnd).Warn("failed to append api request log terminator")
+			}
+		} else {
+			log.WithError(errWrite).Warn("failed to append api request log part")
+			if len(info.Body) > 0 {
+				builder.WriteString(string(info.Body))
+			} else {
+				builder.WriteString("<empty>")
+			}
+			builder.WriteString("\n\n")
+			requestText = builder.String()
+		}
 	} else {
-		builder.WriteString("<empty>")
+		if len(info.Body) > 0 {
+			builder.WriteString(string(info.Body))
+		} else {
+			builder.WriteString("<empty>")
+		}
+		builder.WriteString("\n\n")
+		requestText = builder.String()
 	}
-	builder.WriteString("\n\n")
 
 	attempt := &upstreamAttempt{
-		index:    index,
-		request:  builder.String(),
-		response: &strings.Builder{},
+		index:          index,
+		request:        requestText,
+		response:       &strings.Builder{},
+		responseSource: apiResponseSourceOrNil(ginCtx),
 	}
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
-	updateAggregatedRequest(ginCtx, attempts)
+	if requestText != "" {
+		updateAggregatedRequest(ginCtx, attempts)
+	}
 }
 
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
-	internallogging.SetResponseHeaders(ctx, headers)
+	logging.SetResponseHeaders(ctx, headers)
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx != nil && !isStreamingResponseHeaders(headers) {
 		markAPIResponseTimestamp(ginCtx)
@@ -242,16 +277,18 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	_, attempt := ensureAttempt(ginCtx)
 
 	beforeLen := attempt.response.Len()
-	ensureResponseIntro(attempt)
+	ensureResponseIntro(ginCtx, attempt)
 	if status > 0 && !attempt.statusWritten {
-		attempt.response.WriteString(fmt.Sprintf("Status: %d\n", status))
+		writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("Status: %d\n", status)))
 		attempt.statusWritten = true
 	}
 	if !attempt.headersWritten {
-		attempt.response.WriteString("Headers:\n")
-		writeHeaders(attempt.response, headers)
+		builder := &strings.Builder{}
+		builder.WriteString("Headers:\n")
+		writeHeaders(builder, headers)
+		writeAttemptResponse(ginCtx, attempt, []byte(builder.String()))
 		attempt.headersWritten = true
-		attempt.response.WriteString("\n")
+		writeAttemptResponse(ginCtx, attempt, []byte("\n"))
 	}
 	appendAggregatedResponseDelta(ginCtx, attempt, attempt.response.String()[beforeLen:])
 }
@@ -264,7 +301,7 @@ func isStreamingResponseHeaders(headers http.Header) bool {
 }
 
 func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	if cfg == nil || !cfg.RequestLog || err == nil {
+	if !requestLogCaptureEnabled(cfg) || err == nil {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -274,7 +311,7 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	_, attempt := ensureAttempt(ginCtx)
 
 	beforeLen := attempt.response.Len()
-	ensureResponseIntro(attempt)
+	ensureResponseIntro(ginCtx, attempt)
 	if attempt.bodyStarted && !attempt.bodyHasContent {
 		attempt.bodyStarted = false
 	}
@@ -282,9 +319,9 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 		attempt.response.WriteString("\n")
 	}
 	if attempt.errorWritten {
-		attempt.response.WriteString("\n")
+		writeAttemptResponse(ginCtx, attempt, []byte("\n"))
 	}
-	attempt.response.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
+	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("Error: %s\n", err.Error())))
 	attempt.errorWritten = true
 	appendAggregatedResponseDelta(ginCtx, attempt, attempt.response.String()[beforeLen:])
 }
@@ -309,15 +346,17 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	_, attempt := ensureAttempt(ginCtx)
 
 	beforeLen := attempt.response.Len()
-	ensureResponseIntro(attempt)
+	ensureResponseIntro(ginCtx, attempt)
 	if !attempt.headersWritten {
-		attempt.response.WriteString("Headers:\n")
-		writeHeaders(attempt.response, nil)
+		builder := &strings.Builder{}
+		builder.WriteString("Headers:\n")
+		writeHeaders(builder, nil)
+		writeAttemptResponse(ginCtx, attempt, []byte(builder.String()))
 		attempt.headersWritten = true
-		attempt.response.WriteString("\n")
+		writeAttemptResponse(ginCtx, attempt, []byte("\n"))
 	}
 	if !attempt.bodyStarted {
-		attempt.response.WriteString("Body:\n")
+		writeAttemptResponse(ginCtx, attempt, []byte("Body:\n"))
 		attempt.bodyStarted = true
 	}
 	currentChunkIsSSEEvent := bytes.HasPrefix(data, []byte("event:"))
@@ -327,9 +366,9 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 		if attempt.prevWasSSEEvent && currentChunkIsSSEData {
 			separator = "\n"
 		}
-		attempt.response.WriteString(separator)
+		writeAttemptResponse(ginCtx, attempt, []byte(separator))
 	}
-	attempt.response.WriteString(string(data))
+	writeAttemptResponse(ginCtx, attempt, data)
 	attempt.bodyHasContent = true
 	attempt.prevWasSSEEvent = currentChunkIsSSEEvent
 	appendAggregatedResponseDelta(ginCtx, attempt, attempt.response.String()[beforeLen:])
@@ -372,7 +411,7 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 
 // RecordAPIWebsocketHandshake stores the upstream websocket handshake response metadata.
 func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
-	internallogging.SetResponseHeaders(ctx, headers)
+	logging.SetResponseHeaders(ctx, headers)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -396,7 +435,7 @@ func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status
 
 // RecordAPIWebsocketUpgradeRejection stores a rejected websocket upgrade as an HTTP attempt.
 func RecordAPIWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config, info UpstreamRequestLog, status int, headers http.Header, body []byte) {
-	internallogging.SetResponseHeaders(ctx, headers)
+	logging.SetResponseHeaders(ctx, headers)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -503,9 +542,17 @@ func ensureAttempt(ginCtx *gin.Context) ([]*upstreamAttempt, *upstreamAttempt) {
 	attempts := getAttempts(ginCtx)
 	if len(attempts) == 0 {
 		attempt := &upstreamAttempt{
-			index:    1,
-			request:  "=== API REQUEST 1 ===\n<missing>\n\n",
-			response: &strings.Builder{},
+			index:          1,
+			response:       &strings.Builder{},
+			responseSource: apiResponseSourceOrNil(ginCtx),
+		}
+		if source, ok := apiRequestSource(ginCtx); ok {
+			if errWrite := source.AppendBytes([]byte("=== API REQUEST 1 ===\n<missing>\n\n")); errWrite != nil {
+				log.WithError(errWrite).Warn("failed to append missing api request log part")
+				attempt.request = "=== API REQUEST 1 ===\n<missing>\n\n"
+			}
+		} else {
+			attempt.request = "=== API REQUEST 1 ===\n<missing>\n\n"
 		}
 		attempts = []*upstreamAttempt{attempt}
 		ginCtx.Set(apiAttemptsKey, attempts)
@@ -515,14 +562,38 @@ func ensureAttempt(ginCtx *gin.Context) ([]*upstreamAttempt, *upstreamAttempt) {
 	return attempts, attempts[len(attempts)-1]
 }
 
-func ensureResponseIntro(attempt *upstreamAttempt) {
+func ensureResponseIntro(ginCtx *gin.Context, attempt *upstreamAttempt) {
 	if attempt == nil || attempt.response == nil || attempt.responseIntroWritten {
 		return
 	}
-	attempt.response.WriteString(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index))
-	attempt.response.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
-	attempt.response.WriteString("\n")
+	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index)))
+	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano))))
+	writeAttemptResponse(ginCtx, attempt, []byte("\n"))
 	attempt.responseIntroWritten = true
+}
+
+func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload []byte) {
+	if attempt == nil || len(payload) == 0 {
+		return
+	}
+	if attempt.responseSource == nil {
+		attempt.responseSource = apiResponseSourceOrNil(ginCtx)
+	}
+	if attempt.responseSource != nil {
+		if errWrite := attempt.responseSource.AppendBytes(payload); errWrite == nil {
+			if ginCtx != nil {
+				ginCtx.Set(logging.APIResponseCapturedContextKey, true)
+			}
+			return
+		} else {
+			log.WithError(errWrite).Warn("failed to append api response log part")
+			attempt.responseSource = nil
+		}
+	}
+	if attempt.response == nil {
+		attempt.response = &strings.Builder{}
+	}
+	attempt.response.Write(payload)
 }
 
 func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
@@ -536,6 +607,13 @@ func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
 	ginCtx.Set(apiRequestKey, []byte(builder.String()))
 }
 
+func updateAggregatedResponseIfMemoryBacked(ginCtx *gin.Context, attempts []*upstreamAttempt) {
+	if apiResponseSourceOrNil(ginCtx) != nil {
+		return
+	}
+	updateAggregatedResponse(ginCtx, attempts)
+}
+
 func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) {
 	if ginCtx == nil {
 		return
@@ -545,6 +623,18 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 	state.syncContext(ginCtx)
 }
 
+func apiRequestSource(ginCtx *gin.Context) (*logging.FileBodySource, bool) {
+	return fileBodySourceFromGin(ginCtx, logging.APIRequestSourceContextKey)
+}
+
+func apiResponseSourceOrNil(ginCtx *gin.Context) *logging.FileBodySource {
+	source, ok := fileBodySourceFromGin(ginCtx, logging.APIResponseSourceContextKey)
+	if !ok {
+		return nil
+	}
+	return source
+}
+
 func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
 	if ginCtx == nil {
 		return
@@ -552,6 +642,13 @@ func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
 	data := bytes.TrimSpace(chunk)
 	if len(data) == 0 {
 		return
+	}
+	if source, ok := apiWebsocketTimelineSource(ginCtx); ok {
+		if errAppend := source.AppendPart(data); errAppend == nil {
+			return
+		} else {
+			log.WithError(errAppend).Warn("failed to append api websocket timeline log part")
+		}
 	}
 	if existing, exists := ginCtx.Get(apiWebsocketTimelineKey); exists {
 		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
@@ -567,6 +664,22 @@ func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
 		}
 	}
 	ginCtx.Set(apiWebsocketTimelineKey, bytes.Clone(data))
+}
+
+func apiWebsocketTimelineSource(ginCtx *gin.Context) (*logging.FileBodySource, bool) {
+	return fileBodySourceFromGin(ginCtx, logging.APIWebsocketTimelineSourceContextKey)
+}
+
+func fileBodySourceFromGin(ginCtx *gin.Context, key string) (*logging.FileBodySource, bool) {
+	if ginCtx == nil {
+		return nil, false
+	}
+	value, exists := ginCtx.Get(key)
+	if !exists {
+		return nil, false
+	}
+	source, ok := value.(*logging.FileBodySource)
+	return source, ok && source != nil
 }
 
 func markAPIResponseTimestamp(ginCtx *gin.Context) {
@@ -709,7 +822,7 @@ func LogWithRequestID(ctx context.Context) *log.Entry {
 	if ctx == nil {
 		return log.NewEntry(log.StandardLogger())
 	}
-	requestID := internallogging.GetRequestID(ctx)
+	requestID := logging.GetRequestID(ctx)
 	if requestID == "" {
 		return log.NewEntry(log.StandardLogger())
 	}

@@ -468,16 +468,22 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 type xaiPreparedRequest struct {
 	baseModel       string
 	from            sdktranslator.Format
+	responseFormat  sdktranslator.Format
 	to              sdktranslator.Format
 	originalPayload []byte
 	body            []byte
 	sessionID       string
+	replayScope     xaiReasoningReplayScope
 }
 
 func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
+	return e.prepareResponsesRequestTo(ctx, req, opts, stream, sdktranslator.FormatCodex)
+}
+
+func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format) (*xaiPreparedRequest, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("codex")
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -494,7 +500,7 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxye
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
+	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", stream)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
@@ -502,6 +508,11 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxye
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeXAITools(body)
+	var replayScope xaiReasoningReplayScope
+	body, replayScope, err = applyXAIReasoningReplayCacheRequired(ctx, from, req, opts, body)
+	if err != nil {
+		return nil, err
+	}
 	body = normalizeXAIInputReasoningItems(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
@@ -514,10 +525,12 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxye
 	return &xaiPreparedRequest{
 		baseModel:       baseModel,
 		from:            from,
+		responseFormat:  responseFormat,
 		to:              to,
 		originalPayload: originalPayload,
 		body:            body,
 		sessionID:       sessionID,
+		replayScope:     replayScope,
 	}, nil
 }
 

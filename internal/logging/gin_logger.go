@@ -24,8 +24,9 @@ var aiAPIPrefixes = []string{
 	"/v1/videos",
 	"/v1/messages",
 	"/v1/responses",
+	"/openai/v1/videos",
 	"/v1beta/models/",
-	"/api/provider/",
+	"/backend-api/codex/",
 }
 
 const skipGinLogKey = "__gin_skip_request_logging__"

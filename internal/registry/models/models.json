@@ -46,7 +46,8 @@
         "levels": [
           "low",
           "medium",
-          "high"
+          "high",
+          "max"
         ]
       }
     },
@@ -1361,76 +1362,6 @@
   ],
   "codex-free": [
     {
-      "id": "gpt-5.2",
-      "object": "model",
-      "created": 1765440000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.2",
-      "version": "gpt-5.2",
-      "description": "Stable version of GPT 5.2",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "none",
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.3-codex",
-      "object": "model",
-      "created": 1770307200,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex",
-      "version": "gpt-5.3",
-      "description": "Stable version of GPT 5.3 Codex, The best model for coding and agentic tasks across domains.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.4",
-      "object": "model",
-      "created": 1772668800,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.4",
-      "version": "gpt-5.4",
-      "description": "Stable version of GPT 5.4",
-      "context_length": 1050000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
       "id": "gpt-5.4-mini",
       "object": "model",
       "created": 1773705600,
@@ -1478,53 +1409,6 @@
     }
   ],
   "codex-team": [
-    {
-      "id": "gpt-5.2",
-      "object": "model",
-      "created": 1765440000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.2",
-      "version": "gpt-5.2",
-      "description": "Stable version of GPT 5.2",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "none",
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.3-codex",
-      "object": "model",
-      "created": 1770307200,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex",
-      "version": "gpt-5.3",
-      "description": "Stable version of GPT 5.3 Codex, The best model for coding and agentic tasks across domains.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
     {
       "id": "gpt-5.4",
       "object": "model",
@@ -1619,53 +1503,6 @@
     }
   ],
   "codex-plus": [
-    {
-      "id": "gpt-5.2",
-      "object": "model",
-      "created": 1765440000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.2",
-      "version": "gpt-5.2",
-      "description": "Stable version of GPT 5.2",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "none",
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.3-codex",
-      "object": "model",
-      "created": 1770307200,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex",
-      "version": "gpt-5.3",
-      "description": "Stable version of GPT 5.3 Codex, The best model for coding and agentic tasks across domains.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
     {
       "id": "gpt-5.3-codex-spark",
       "object": "model",
@@ -1783,53 +1620,6 @@
     }
   ],
   "codex-pro": [
-    {
-      "id": "gpt-5.2",
-      "object": "model",
-      "created": 1765440000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.2",
-      "version": "gpt-5.2",
-      "description": "Stable version of GPT 5.2",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "none",
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.3-codex",
-      "object": "model",
-      "created": 1770307200,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex",
-      "version": "gpt-5.3",
-      "description": "Stable version of GPT 5.3 Codex, The best model for coding and agentic tasks across domains.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
     {
       "id": "gpt-5.3-codex-spark",
       "object": "model",
@@ -1972,7 +1762,12 @@
         "min": 1024,
         "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
       }
     },
     {
@@ -1982,14 +1777,19 @@
       "owned_by": "moonshot",
       "type": "kimi",
       "display_name": "Kimi K2.5",
-      "description": "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities",
-      "context_length": 131072,
+      "description": "Kimi K2.5 - Native multimodal agentic model with text, image, and video input; supports thinking and non-thinking modes",
+      "context_length": 262144,
       "max_completion_tokens": 32768,
       "thinking": {
         "min": 1024,
         "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
       }
     },
     {
@@ -1999,14 +1799,63 @@
       "owned_by": "moonshot",
       "type": "kimi",
       "display_name": "Kimi K2.6",
-      "description": "Kimi K2.6 - Latest Moonshot AI coding model with improved capabilities",
+      "description": "Kimi K2.6 - Native multimodal agentic model with stronger long-horizon agentic coding, long-context reasoning, and preserved thinking support",
       "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {
         "min": 1024,
         "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.7 Code",
+      "description": "Kimi K2.7 Code - Moonshot AI's latest coding-focused model",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "kimi-k2.7-code-highspeed",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.7 Code HighSpeed",
+      "description": "Kimi K2.7 Code HighSpeed - Same capabilities as Kimi K2.7 Code with higher output speed (~180 tokens/s)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
       }
     }
   ],
@@ -2068,41 +1917,23 @@
       }
     },
     {
-      "id": "gemini-3-pro-high",
+      "id": "gemini-3-flash-agent",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
-      "display_name": "Gemini 3 Pro (High)",
-      "name": "gemini-3-pro-high",
-      "description": "Gemini 3 Pro (High)",
+      "display_name": "Gemini 3.5 Flash (High)",
+      "name": "gemini-3-flash-agent",
+      "description": "Gemini 3.5 Flash (High)",
       "context_length": 1048576,
-      "max_completion_tokens": 65535,
+      "max_completion_tokens": 65536,
       "thinking": {
         "min": 128,
         "max": 32768,
         "dynamic_allowed": true,
         "levels": [
+          "minimal",
           "low",
-          "high"
-        ]
-      }
-    },
-    {
-      "id": "gemini-3-pro-low",
-      "object": "model",
-      "owned_by": "antigravity",
-      "type": "antigravity",
-      "display_name": "Gemini 3 Pro (Low)",
-      "name": "gemini-3-pro-low",
-      "description": "Gemini 3 Pro (Low)",
-      "context_length": 1048576,
-      "max_completion_tokens": 65535,
-      "thinking": {
-        "min": 128,
-        "max": 32768,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
+          "medium",
           "high"
         ]
       }

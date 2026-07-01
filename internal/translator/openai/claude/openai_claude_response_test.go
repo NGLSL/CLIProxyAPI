@@ -174,3 +174,231 @@ func TestOpenAIClaudeStreamOrdersMultipleToolBlocks(t *testing.T) {
 		t.Fatalf("expected two ordered tool block stops, got %d", got)
 	}
 }
+
+func TestStreamingTool_EmptyNameThroughout(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":"{\"x\":1}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	if got := len(toolUseStarts(events)); got != 0 {
+		t.Fatalf("expected zero tool_use content_block_start, got %d (events=%+v)", got, events)
+	}
+	if got := countByType(events, "content_block_delta"); got != 0 {
+		t.Fatalf("expected zero content_block_delta when start was suppressed, got %d", got)
+	}
+	if got := countByType(events, "content_block_stop"); got != 0 {
+		t.Fatalf("expected zero content_block_stop when start was suppressed, got %d", got)
+	}
+	if got := lastStopReason(events); got == "tool_use" {
+		t.Fatalf("stop_reason must not be tool_use when zero tool_use blocks were emitted; got %q", got)
+	}
+}
+
+func TestStreamingTool_NullName(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":null,"arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	if got := len(toolUseStarts(events)); got != 0 {
+		t.Fatalf("null name must not produce a tool_use start; got %d", got)
+	}
+	if got := countByType(events, "content_block_stop"); got != 0 {
+		t.Fatalf("null name must not produce content_block_stop; got %d", got)
+	}
+}
+
+func TestStreamingTool_NonStringName(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":123,"arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	if got := len(toolUseStarts(events)); got != 0 {
+		t.Fatalf("non-string name must not produce a tool_use start; got %d", got)
+	}
+}
+
+func TestStreamingTool_RepeatedName(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"do_it","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"do_it","arguments":"{\"x\""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"do_it","arguments":":1}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected exactly one tool_use start, got %d", len(starts))
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
+		t.Fatalf("announced tool name = %q, want %q", name, "do_it")
+	}
+	if got := countByType(events, "content_block_stop"); got != 1 {
+		t.Fatalf("expected exactly one content_block_stop, got %d", got)
+	}
+}
+
+func TestStreamingTool_MixedSuppressedAndValid(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
+			{"index":0,"id":"call_skip","function":{"name":"","arguments":""}},
+			{"index":1,"id":"call_real","function":{"name":"do_it","arguments":""}}
+		]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[
+			{"index":1,"function":{"arguments":"{}"}}
+		]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected exactly one tool_use start, got %d", len(starts))
+	}
+	if got := countByType(events, "content_block_stop"); got != 1 {
+		t.Fatalf("expected exactly one content_block_stop, got %d", got)
+	}
+
+	indices := blockIndices(events)
+	if len(indices) == 0 || indices[0] != 0 {
+		t.Fatalf("first content_block_start index must be 0, got %v", indices)
+	}
+}
+
+func TestStreamingTool_EmptyIDDeferStart(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"","function":{"name":"do_it","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_real","function":{"arguments":"{}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected exactly one tool_use start once id arrived, got %d", len(starts))
+	}
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_real" {
+		t.Fatalf("announced tool id = %q, want %q", id, "call_real")
+	}
+}
+
+func TestStreamingTool_IDInDeltaWithoutFunction(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"do_it"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_real"}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected exactly one tool_use start when id arrives in a function-less delta, got %d", len(starts))
+	}
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_real" {
+		t.Fatalf("announced tool id = %q, want %q", id, "call_real")
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
+		t.Fatalf("announced tool name = %q, want %q", name, "do_it")
+	}
+	if got := countByType(events, "content_block_stop"); got != 1 {
+		t.Fatalf("expected exactly one content_block_stop, got %d", got)
+	}
+}
+
+func TestStreamingTool_StopReasonWithEmittedTool(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"do_it","arguments":"{}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+	)
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+}
+
+func TestStreamingTool_StopReasonWhenIDNeverArrives(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"do_it","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one belated tool_use start with synthetic id, got %d", len(starts))
+	}
+	id := gjson.Get(starts[0].Payload, "content_block.id").String()
+	if !strings.HasPrefix(id, "toolu_") {
+		t.Fatalf("synthetic id should match toolu_<nanos>_<n>, got %q", id)
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
+		t.Fatalf("announced tool name = %q, want %q", name, "do_it")
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+}
+
+func TestStreamingTool_BelatedStartsUseOpenAIToolIndexOrder(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
+			{"index":2,"function":{"name":"third_tool","arguments":"{}"}},
+			{"index":0,"function":{"name":"first_tool","arguments":"{}"}},
+			{"index":1,"function":{"name":"second_tool","arguments":"{}"}}
+		]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 3 {
+		t.Fatalf("expected three belated tool_use starts, got %d", len(starts))
+	}
+
+	wantNames := []string{"first_tool", "second_tool", "third_tool"}
+	for i, wantName := range wantNames {
+		if name := gjson.Get(starts[i].Payload, "content_block.name").String(); name != wantName {
+			t.Fatalf("tool_use start %d name = %q, want %q (starts=%+v)", i, name, wantName, starts)
+		}
+		if blockIndex := gjson.Get(starts[i].Payload, "index").Int(); blockIndex != int64(i) {
+			t.Fatalf("tool_use start %d block index = %d, want %d", i, blockIndex, i)
+		}
+	}
+}
+
+func TestStreamingTool_LateIDAfterFinalization(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"do_it"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_late"}]}}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one belated tool_use start, got %d", len(starts))
+	}
+
+	var sawMessageStop bool
+	for _, e := range events {
+		if e.Type == "message_stop" {
+			sawMessageStop = true
+			continue
+		}
+		if sawMessageStop {
+			switch e.Type {
+			case "content_block_start", "content_block_delta", "content_block_stop":
+				t.Fatalf("event %q emitted after message_stop (events=%+v)", e.Type, events)
+			}
+		}
+	}
+}
+
+func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
+			{"index":0,"id":"call_skip","function":{"name":"","arguments":""}},
+			{"index":1,"id":"call_real","function":{"name":"do_it","arguments":"{}"}}
+		]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+}

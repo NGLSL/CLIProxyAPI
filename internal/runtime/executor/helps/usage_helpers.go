@@ -3,12 +3,17 @@ package helps
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	internallogging "github.com/NGLSL/CLIProxyAPI/v7/internal/logging"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/thinking"
 	internalusage "github.com/NGLSL/CLIProxyAPI/v7/internal/usage"
 	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -18,16 +23,37 @@ import (
 )
 
 type UsageReporter struct {
-	provider    string
-	model       string
-	alias       string
-	authID      string
-	authIndex   string
-	apiKey      string
-	source      string
-	reasoning   string
-	requestedAt time.Time
-	once        sync.Once
+	provider     string
+	executorType string
+	model        string
+	alias        string
+	authID       string
+	authIndex    string
+	authType     string
+	apiKey       string
+	source       string
+	reasoning    string
+	serviceTier  string
+	requestedAt  time.Time
+	ttftMu       sync.RWMutex
+	ttft         time.Duration
+	ttftStart    time.Time
+	ttftSet      bool
+	once         sync.Once
+}
+
+type usageExecutor interface {
+	Identifier() string
+}
+
+func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model string, auth *cliproxyauth.Auth) *UsageReporter {
+	provider := ""
+	if executor != nil {
+		provider = executor.Identifier()
+	}
+	reporter := NewUsageReporter(ctx, provider, model, auth)
+	reporter.executorType = ExecutorTypeName(executor)
+	return reporter
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -43,7 +69,9 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		requestedAt: time.Now(),
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
+		authType:    resolveUsageAuthType(auth),
 		reasoning:   usage.ReasoningEffortFromContext(ctx),
+		serviceTier: usage.ServiceTierFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -52,24 +80,112 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	return reporter
 }
 
+func ExecutorTypeName(executor any) string {
+	if executor == nil {
+		return ""
+	}
+	executorType := reflect.TypeOf(executor)
+	for executorType.Kind() == reflect.Pointer {
+		executorType = executorType.Elem()
+	}
+	return strings.TrimSpace(executorType.Name())
+}
+
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
-	r.publishWithOutcome(ctx, detail, false)
+	r.publishWithOutcome(ctx, detail, false, usage.Failure{})
 }
 
 func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
+	record, ok := r.buildAdditionalModelRecord(ctx, model, detail)
+	if !ok {
+		return
+	}
+	r.publishRecord(ctx, record)
+}
+
+func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
 	if r == nil {
 		return
 	}
-	model = strings.TrimSpace(model)
-	if model == "" {
-		return
-	}
-	detail = normalizeUsageDetailTotal(detail)
-	usage.PublishRecord(ctx, r.buildRecordForModel(ctx, model, detail, false))
+	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
+	r.serviceTier = extractServiceTierFromPayload(payload)
 }
 
-func (r *UsageReporter) PublishFailure(ctx context.Context) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true)
+func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
+	if r == nil || client == nil {
+		return client
+	}
+	tracked := *client
+	transport := tracked.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	tracked.Transport = usageTTFTRoundTripper{
+		base:     transport,
+		reporter: r,
+	}
+	return &tracked
+}
+
+func (r *UsageReporter) ObserveResponse(resp *http.Response) {
+	if r == nil || resp == nil || resp.Body == nil {
+		return
+	}
+	r.StartResponseTTFT()
+	resp.Body = &usageTTFTReadCloser{
+		ReadCloser: resp.Body,
+		mark: func() {
+			r.MarkFirstResponseByte()
+		},
+	}
+}
+
+func (r *UsageReporter) StartResponseTTFT() {
+	if r == nil {
+		return
+	}
+	r.ttftMu.Lock()
+	if !r.ttftSet && r.ttftStart.IsZero() {
+		r.ttftStart = time.Now()
+	}
+	r.ttftMu.Unlock()
+}
+
+func (r *UsageReporter) MarkFirstResponseByte() {
+	if r == nil {
+		return
+	}
+	r.ttftMu.Lock()
+	if r.ttftSet {
+		r.ttftMu.Unlock()
+		return
+	}
+	start := r.ttftStart
+	r.ttftStart = time.Time{}
+	r.ttftMu.Unlock()
+	if start.IsZero() {
+		return
+	}
+	r.setTTFT(time.Since(start))
+}
+
+func (r *UsageReporter) buildAdditionalModelRecord(ctx context.Context, model string, detail usage.Detail) (usage.Record, bool) {
+	if r == nil {
+		return usage.Record{}, false
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return usage.Record{}, false
+	}
+	detail = normalizeUsageDetailTotal(detail)
+	if !hasNonZeroTokenUsage(detail) {
+		return usage.Record{}, false
+	}
+	return r.buildRecordForModel(ctx, model, detail, false, usage.Failure{}), true
+}
+
+func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
+	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...))
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -77,17 +193,17 @@ func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 		return
 	}
 	if *errPtr != nil {
-		r.PublishFailure(ctx)
+		r.PublishFailure(ctx, *errPtr)
 	}
 }
 
-func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {
+func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool, fail usage.Failure) {
 	if r == nil {
 		return
 	}
 	detail = normalizeUsageDetailTotal(detail)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(ctx, detail, failed))
+		r.publishRecord(ctx, r.buildRecord(ctx, detail, failed, fail))
 	})
 }
 
@@ -101,6 +217,16 @@ func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
 	return detail
 }
 
+func hasNonZeroTokenUsage(detail usage.Detail) bool {
+	return detail.InputTokens != 0 ||
+		detail.OutputTokens != 0 ||
+		detail.ReasoningTokens != 0 ||
+		detail.CachedTokens != 0 ||
+		detail.CacheReadTokens != 0 ||
+		detail.CacheCreationTokens != 0 ||
+		detail.TotalTokens != 0
+}
+
 // ensurePublished guarantees that a usage record is emitted exactly once.
 // It is safe to call multiple times; only the first call wins due to once.Do.
 // This is used to ensure request counting even when upstream responses do not
@@ -110,20 +236,29 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(ctx, usage.Detail{}, false))
+		r.publishRecord(ctx, r.buildRecord(ctx, usage.Detail{}, false, usage.Failure{}))
 	})
 }
 
-func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool) usage.Record {
-	if r == nil {
-		return usage.Record{Detail: detail, Failed: failed}
-	}
-	return r.buildRecordForModel(ctx, r.model, detail, failed)
+func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
+	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
+	usage.PublishRecord(ctx, record)
 }
 
-func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
+	var fail usage.Failure
+	if len(failures) > 0 {
+		fail = failures[0]
+	}
 	if r == nil {
-		return usage.Record{Model: model, Detail: detail, Failed: failed}
+		return usage.Record{Detail: detail, Failed: failed, Fail: fail}
+	}
+	return r.buildRecordForModel(ctx, r.model, detail, failed, fail)
+}
+
+func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
+	if r == nil {
+		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
 	}
 	metrics := internalusage.SnapshotRequestMetrics(ctx)
 	apiFirstByteLatency := r.apiFirstByteLatency(ctx)
@@ -131,26 +266,65 @@ func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, d
 	if firstByteLatency == 0 {
 		firstByteLatency = apiFirstByteLatency
 	}
+	ttft := r.ttftDuration()
+	if ttft == 0 {
+		ttft = firstByteLatency
+	}
 	return usage.Record{
 		Provider:            r.provider,
+		ExecutorType:        r.executorType,
 		Model:               model,
 		Alias:               r.alias,
 		Source:              r.source,
 		APIKey:              r.apiKey,
 		AuthID:              r.authID,
 		AuthIndex:           r.authIndex,
+		AuthType:            r.authType,
 		ReasoningEffort:     r.reasoning,
+		ServiceTier:         r.serviceTier,
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),
 		FirstByteLatency:    firstByteLatency,
 		APIFirstByteLatency: apiFirstByteLatency,
+		TTFT:                ttft,
 		Failed:              failed,
+		Fail:                fail,
 		ChunkCount:          metrics.ChunkCount,
 		ResponseBytes:       metrics.ResponseBytes,
 		APIResponseBytes:    metrics.APIResponseBytes,
 		Detail:              detail,
 		ResponseHeaders:     internallogging.GetResponseHeaders(ctx),
 	}
+}
+
+func extractServiceTierFromPayload(payload []byte) string {
+	if len(payload) == 0 {
+		return usage.DefaultServiceTier
+	}
+	for _, path := range []string{"service_tier", "request.service_tier", "response.service_tier"} {
+		serviceTier := strings.TrimSpace(gjson.GetBytes(payload, path).String())
+		if serviceTier != "" {
+			return serviceTier
+		}
+	}
+	return usage.DefaultServiceTier
+}
+
+func failFromErrors(errs ...error) usage.Failure {
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		fail := usage.Failure{
+			Body: strings.TrimSpace(err.Error()),
+		}
+		var statusErr interface{ StatusCode() int }
+		if errors.As(err, &statusErr) && statusErr != nil {
+			fail.StatusCode = statusErr.StatusCode()
+		}
+		return fail
+	}
+	return usage.Failure{}
 }
 
 func (r *UsageReporter) latency() time.Duration {
@@ -162,6 +336,65 @@ func (r *UsageReporter) latency() time.Duration {
 		return 0
 	}
 	return latency
+}
+
+func (r *UsageReporter) setTTFT(ttft time.Duration) {
+	if r == nil {
+		return
+	}
+	if ttft < 0 {
+		ttft = 0
+	}
+	r.ttftMu.Lock()
+	if r.ttftSet {
+		r.ttftMu.Unlock()
+		return
+	}
+	r.ttft = ttft
+	r.ttftSet = true
+	r.ttftStart = time.Time{}
+	r.ttftMu.Unlock()
+}
+
+func (r *UsageReporter) ttftDuration() time.Duration {
+	if r == nil {
+		return 0
+	}
+	r.ttftMu.RLock()
+	defer r.ttftMu.RUnlock()
+	return r.ttft
+}
+
+type usageTTFTRoundTripper struct {
+	base     http.RoundTripper
+	reporter *UsageReporter
+}
+
+func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.reporter.StartResponseTTFT()
+	resp, errRoundTrip := t.base.RoundTrip(req)
+	if errRoundTrip != nil {
+		return resp, errRoundTrip
+	}
+	t.reporter.ObserveResponse(resp)
+	return resp, nil
+}
+
+type usageTTFTReadCloser struct {
+	io.ReadCloser
+	once sync.Once
+	mark func()
+}
+
+func (r *usageTTFTReadCloser) Read(p []byte) (int, error) {
+	if r == nil || r.ReadCloser == nil {
+		return 0, io.ErrClosedPipe
+	}
+	n, errRead := r.ReadCloser.Read(p)
+	if n > 0 && r.mark != nil {
+		r.once.Do(r.mark)
+	}
+	return n, errRead
 }
 
 func (r *UsageReporter) apiFirstByteLatency(ctx context.Context) time.Duration {
@@ -231,14 +464,16 @@ func APIKeyFromContext(ctx context.Context) string {
 	if !ok || ginCtx == nil {
 		return ""
 	}
-	if v, exists := ginCtx.Get("apiKey"); exists {
-		switch value := v.(type) {
-		case string:
-			return value
-		case fmt.Stringer:
-			return value.String()
-		default:
-			return fmt.Sprintf("%v", value)
+	for _, key := range []string{"userApiKey", "apiKey"} {
+		if v, exists := ginCtx.Get(key); exists {
+			switch value := v.(type) {
+			case string:
+				return value
+			case fmt.Stringer:
+				return value.String()
+			default:
+				return fmt.Sprintf("%v", value)
+			}
 		}
 	}
 	return ""
@@ -247,11 +482,6 @@ func APIKeyFromContext(ctx context.Context) string {
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 	if auth != nil {
 		provider := strings.TrimSpace(auth.Provider)
-		if strings.EqualFold(provider, "gemini-cli") {
-			if id := strings.TrimSpace(auth.ID); id != "" {
-				return id
-			}
-		}
 		if strings.EqualFold(provider, "vertex") {
 			if auth.Metadata != nil {
 				if projectID, ok := auth.Metadata["project_id"].(string); ok {
@@ -286,6 +516,13 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 		return trimmed
 	}
 	return ""
+}
+
+func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return auth.AuthKind()
 }
 
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {
@@ -451,28 +688,6 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	return detail
 }
 
-func hasGeminiFamilyUsageTokenFields(node gjson.Result) bool {
-	return node.Get("promptTokenCount").Exists() ||
-		node.Get("candidatesTokenCount").Exists() ||
-		node.Get("thoughtsTokenCount").Exists() ||
-		node.Get("totalTokenCount").Exists() ||
-		node.Get("cachedContentTokenCount").Exists()
-}
-
-func ParseGeminiCLIUsage(data []byte) usage.Detail {
-	usageNode := gjson.ParseBytes(data)
-	node := firstExistingUsageNode(usageNode,
-		"response.usageMetadata",
-		"response.usage_metadata",
-		"usageMetadata",
-		"usage_metadata",
-	)
-	if !node.Exists() {
-		return usage.Detail{}
-	}
-	return parseGeminiFamilyUsageDetail(node)
-}
-
 func ParseGeminiUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data)
 	node := usageNode.Get("usageMetadata")
@@ -500,25 +715,25 @@ func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 	return parseGeminiFamilyUsageDetail(node), true
 }
 
+func ParseGeminiCLIUsage(data []byte) usage.Detail {
+	root := gjson.ParseBytes(data)
+	node := firstExistingUsageNode(root, "usageMetadata", "usage_metadata", "response.usageMetadata", "response.usage_metadata")
+	if !node.Exists() {
+		return usage.Detail{}
+	}
+	return parseGeminiFamilyUsageDetail(node)
+}
+
 func ParseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
 	payload := jsonPayload(line)
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
-	root := gjson.ParseBytes(payload)
-	node := firstExistingUsageNode(root,
-		"response.usageMetadata",
-		"response.usage_metadata",
-		"usageMetadata",
-		"usage_metadata",
-	)
-	if !node.Exists() {
+	detail := ParseGeminiCLIUsage(payload)
+	if !hasNonZeroTokenUsage(detail) {
 		return usage.Detail{}, false
 	}
-	if !hasGeminiFamilyUsageTokenFields(node) {
-		return usage.Detail{}, false
-	}
-	return parseGeminiFamilyUsageDetail(node), true
+	return detail, true
 }
 
 func firstExistingUsageNode(root gjson.Result, paths ...string) gjson.Result {

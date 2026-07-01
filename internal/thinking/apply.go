@@ -28,7 +28,6 @@ var providerAppliersMu sync.RWMutex
 // nativeProviderAppliers maps built-in provider names to their implementations.
 var nativeProviderAppliers = map[string]ProviderApplier{
 	"gemini":      nil,
-	"gemini-cli":  nil,
 	"claude":      nil,
 	"openai":      nil,
 	"codex":       nil,
@@ -353,10 +352,26 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 	var config ThinkingConfig
 	if suffixResult.HasSuffix {
 		config = parseSuffixToConfig(suffixResult.RawSuffix, toFormat, modelID)
+		log.WithFields(log.Fields{
+			"provider": toFormat,
+			"model":    modelID,
+			"mode":     config.Mode,
+			"budget":   config.Budget,
+			"level":    config.Level,
+		}).Debug("thinking: config from model suffix |")
 	} else {
 		config = extractThinkingConfig(body, fromFormat)
 		if !hasThinkingConfig(config) && fromFormat != toFormat {
 			config = extractThinkingConfig(body, toFormat)
+		}
+		if hasThinkingConfig(config) {
+			log.WithFields(log.Fields{
+				"provider": toFormat,
+				"model":    modelID,
+				"mode":     config.Mode,
+				"budget":   config.Budget,
+				"level":    config.Level,
+			}).Debug("thinking: original config from request |")
 		}
 	}
 
@@ -377,15 +392,14 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		return body, nil
 	}
 
+	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
 	log.WithFields(log.Fields{
 		"provider": toFormat,
 		"model":    modelID,
 		"mode":     config.Mode,
 		"budget":   config.Budget,
 		"level":    config.Level,
-	}).Debug("thinking: applying config for user-defined model (skip validation)")
-
-	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+	}).Debug("thinking: processed config to apply |")
 	return applier.Apply(body, config, modelInfo)
 }
 
@@ -418,7 +432,7 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 	switch provider {
 	case "claude":
 		return extractClaudeConfig(body)
-	case "gemini", "gemini-cli", "antigravity":
+	case "gemini", "antigravity":
 		return extractGeminiConfig(body, provider)
 	case "openai":
 		return extractOpenAIConfig(body)
@@ -450,6 +464,24 @@ func ExtractReasoningEffort(body []byte, provider, model string) string {
 		switch provider {
 		case "openai", "openai-response":
 			config = extractCodexConfig(body)
+		}
+	}
+	return reasoningEffortFromConfig(config)
+}
+
+// ExtractTranslatedReasoningEffort 从已经翻译好的上游请求体中读取最终生效的思考强度。
+// 这里不再读取模型后缀，因为翻译后的 payload 已经是实际要发给上游的格式；
+// 对 OpenAI 兼容路径同时兼容 Responses 的 reasoning.effort 和 Chat Completions 的 reasoning_effort。
+func ExtractTranslatedReasoningEffort(body []byte, provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	config := extractThinkingConfig(body, provider)
+	if !hasThinkingConfig(config) {
+		switch provider {
+		case "openai", "openai-response":
+			config = extractCodexConfig(body)
+			if !hasThinkingConfig(config) {
+				config = extractOpenAIConfig(body)
+			}
 		}
 	}
 	return reasoningEffortFromConfig(config)
@@ -546,13 +578,13 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 //   - generationConfig.thinkingConfig.thinkingLevel: "none", "auto", or level name (Gemini 3)
 //   - generationConfig.thinkingConfig.thinkingBudget: integer (Gemini 2.5)
 //
-// For gemini-cli and antigravity providers, the path is prefixed with "request.".
+// For antigravity providers, the path is prefixed with "request.".
 //
 // Priority: thinkingLevel is checked first (Gemini 3 format), then thinkingBudget (Gemini 2.5 format).
 // This allows newer Gemini 3 level-based configs to take precedence.
 func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 	prefix := "generationConfig.thinkingConfig"
-	if provider == "gemini-cli" || provider == "antigravity" {
+	if provider == "antigravity" {
 		prefix = "request.generationConfig.thinkingConfig"
 	}
 

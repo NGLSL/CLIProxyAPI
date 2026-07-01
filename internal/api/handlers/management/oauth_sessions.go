@@ -209,6 +209,17 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	return strings.EqualFold(session.Provider, provider)
 }
 
+func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
 var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
 func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
@@ -247,17 +258,6 @@ func GetOAuthSessionDetails(state string) (provider string, status string, isPlu
 
 func IsOAuthSessionPending(state, provider string) bool {
 	return oauthSessions.IsPending(state, provider)
-}
-
-func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
 }
 
 func oauthSessionErrorWithCause(message string, cause error) string {
@@ -308,8 +308,6 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "anthropic", nil
 	case "codex", "openai":
 		return "codex", nil
-	case "gemini", "google":
-		return "gemini", nil
 	case "antigravity", "anti-gravity":
 		return "antigravity", nil
 	case "xai", "x-ai", "x.ai", "grok":
@@ -319,6 +317,38 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 	}
 }
 
+func NormalizeOAuthCallbackProvider(provider string) (string, error) {
+	if normalized, errNormalize := NormalizeOAuthProvider(provider); errNormalize == nil {
+		return normalized, nil
+	}
+	return NormalizePluginOAuthCallbackProvider(provider)
+}
+
+func NormalizePluginOAuthCallbackProvider(provider string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(provider))
+	if trimmed == "" {
+		return "", errUnsupportedOAuthFlow
+	}
+	for _, r := range trimmed {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-':
+		default:
+			return "", errUnsupportedOAuthFlow
+		}
+	}
+	return trimmed, nil
+}
+
+func normalizeOAuthCallbackProviderForPendingSession(provider, state string) (string, error) {
+	session, ok := oauthSessions.Get(state)
+	if ok && session.Source == oauthSessionSourcePlugin {
+		return NormalizePluginOAuthCallbackProvider(provider)
+	}
+	return NormalizeOAuthCallbackProvider(provider)
+}
+
 type oauthCallbackFilePayload struct {
 	Code  string `json:"code"`
 	State string `json:"state"`
@@ -326,12 +356,20 @@ type oauthCallbackFilePayload struct {
 }
 
 func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string) (string, error) {
+	canonicalProvider, err := NormalizeOAuthCallbackProvider(provider)
+	if err != nil {
+		return "", err
+	}
+	return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+}
+
+func writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage string) (string, error) {
 	if strings.TrimSpace(authDir) == "" {
 		return "", fmt.Errorf("auth dir is empty")
 	}
-	canonicalProvider, err := NormalizeOAuthProvider(provider)
-	if err != nil {
-		return "", err
+	canonicalProvider = strings.TrimSpace(canonicalProvider)
+	if canonicalProvider == "" {
+		return "", errUnsupportedOAuthFlow
 	}
 	if err := ValidateOAuthState(state); err != nil {
 		return "", err
@@ -339,6 +377,9 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 
 	fileName := fmt.Sprintf(".oauth-%s-%s.oauth", canonicalProvider, state)
 	filePath := filepath.Join(authDir, fileName)
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		return "", fmt.Errorf("create oauth callback dir: %w", err)
+	}
 	payload := oauthCallbackFilePayload{
 		Code:  strings.TrimSpace(code),
 		State: strings.TrimSpace(state),
@@ -355,12 +396,12 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 }
 
 func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, errorMessage string) (string, error) {
-	canonicalProvider, err := NormalizeOAuthProvider(provider)
+	canonicalProvider, err := normalizeOAuthCallbackProviderForPendingSession(provider, state)
 	if err != nil {
 		return "", err
 	}
 	if !IsOAuthSessionPending(state, canonicalProvider) {
 		return "", errOAuthSessionNotPending
 	}
-	return WriteOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+	return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
 }

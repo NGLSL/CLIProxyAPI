@@ -368,35 +368,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		var chatCompletionsTools []interface{}
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
-			// Only function tools need structural conversion because Chat Completions nests details under "function".
-			toolType := tool.Get("type").String()
-			if toolType != "" && toolType != "function" && tool.IsObject() {
-				// Almost all providers lack built-in tools, so we just ignore them.
-				// chatCompletionsTools = append(chatCompletionsTools, tool.Value())
-				return true
+			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
+				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
 			}
-
-			chatTool := []byte(`{"type":"function","function":{}}`)
-
-			// Convert tool structure from responses format to chat completions format
-			function := []byte(`{"name":"","description":"","parameters":{}}`)
-
-			if name := tool.Get("name"); name.Exists() {
-				function, _ = sjson.SetBytes(function, "name", name.String())
-			}
-
-			if description := tool.Get("description"); description.Exists() {
-				function, _ = sjson.SetBytes(function, "description", description.String())
-			}
-
-			if parameters := tool.Get("parameters"); parameters.Exists() {
-				function, _ = sjson.SetRawBytes(function, "parameters", []byte(parameters.Raw))
-			}
-
-			chatTool, _ = sjson.SetRawBytes(chatTool, "function", function)
-			chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
-
 			return true
 		})
 
@@ -422,4 +396,21 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	return out
+}
+
+func collectOpenAIResponsesReasoningContent(item gjson.Result) string {
+	var reasoningText strings.Builder
+	if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+		summary.ForEach(func(_, summaryItem gjson.Result) bool {
+			if summaryItem.Get("type").String() != "summary_text" {
+				return true
+			}
+			reasoningText.WriteString(summaryItem.Get("text").String())
+			return true
+		})
+	}
+	if reasoningText.Len() == 0 {
+		return "[reasoning unavailable]"
+	}
+	return reasoningText.String()
 }

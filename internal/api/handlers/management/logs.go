@@ -31,6 +31,12 @@ const (
 )
 
 // GetLogs returns log lines with optional incremental loading.
+//
+// The legacy timestamp path keeps line-count as the total scanned line count for
+// compatibility. Cursor and tail reads avoid scanning older files, so line-count
+// is the number of returned lines there. A cursor emitted by the legacy path
+// points at the latest complete log boundary; combining after with limit is
+// therefore tail semantics and does not replay lines trimmed by limit.
 func (h *Handler) GetLogs(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
@@ -108,7 +114,7 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	acc := newLogAccumulator(cutoff, limit)
 	for i := range files {
 		if errProcess := acc.consumeFile(files[i]); errProcess != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errProcess)})
 			return
 		}
 	}

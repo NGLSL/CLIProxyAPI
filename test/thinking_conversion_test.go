@@ -1040,10 +1040,10 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue: "128000",
 			expectErr:   false,
 		},
-		// Case 88: Gemini-CLI to Antigravity, budget 8192 → passthrough thinkingBudget
+		// Case 88: Antigravity to Antigravity, budget 8192 → passthrough thinkingBudget
 		{
 			name:            "88",
-			from:            "gemini-cli",
+			from:            "antigravity",
 			to:              "antigravity",
 			model:           "antigravity-budget-model(8192)",
 			inputJSON:       `{"model":"antigravity-budget-model(8192)","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
@@ -1052,10 +1052,10 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 89: Gemini-CLI to Antigravity, budget 64000 → clamped to Max
+		// Case 89: Antigravity to Antigravity, budget 64000 → clamped to Max
 		{
 			name:            "89",
-			from:            "gemini-cli",
+			from:            "antigravity",
 			to:              "antigravity",
 			model:           "antigravity-budget-model(64000)",
 			inputJSON:       `{"model":"antigravity-budget-model(64000)","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
@@ -1513,6 +1513,46 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectValue:     "low",
 			includeThoughts: "false",
 			expectErr:       false,
+		},
+		// Case 31A: reasoning_effort=none with zero allowed → delete thinkingConfig
+		{
+			name:        "31A",
+			from:        "openai",
+			to:          "gemini",
+			model:       "gemini-zero-mixed-model",
+			inputJSON:   `{"model":"gemini-zero-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+			expectField: "",
+			expectErr:   false,
+		},
+		// Case 31C: reasoning_effort=none with zero allowed to Antigravity → delete thinkingConfig
+		{
+			name:        "31C",
+			from:        "openai",
+			to:          "antigravity",
+			model:       "gemini-zero-mixed-model",
+			inputJSON:   `{"model":"gemini-zero-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+			expectField: "",
+			expectErr:   false,
+		},
+		// Case 31D: reasoning.effort=none with zero allowed → delete thinkingConfig
+		{
+			name:        "31D",
+			from:        "openai-response",
+			to:          "gemini",
+			model:       "gemini-zero-mixed-model",
+			inputJSON:   `{"model":"gemini-zero-mixed-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			expectField: "",
+			expectErr:   false,
+		},
+		// Case 31F: reasoning.effort=none with zero allowed to Antigravity → delete thinkingConfig
+		{
+			name:        "31F",
+			from:        "openai-response",
+			to:          "antigravity",
+			model:       "gemini-zero-mixed-model",
+			inputJSON:   `{"model":"gemini-zero-mixed-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			expectField: "",
+			expectErr:   false,
 		},
 		// Case 32: reasoning_effort=auto → -1 (DynamicAllowed=true)
 		{
@@ -2143,10 +2183,10 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectField: "",
 			expectErr:   true,
 		},
-		// Case 88: Gemini-CLI to Antigravity, thinkingBudget=8192 → passthrough
+		// Case 88: Antigravity to Antigravity, thinkingBudget=8192 → passthrough
 		{
 			name:            "88",
-			from:            "gemini-cli",
+			from:            "antigravity",
 			to:              "antigravity",
 			model:           "antigravity-budget-model",
 			inputJSON:       `{"model":"antigravity-budget-model","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}}}}`,
@@ -2155,10 +2195,10 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 89: Gemini-CLI to Antigravity, thinkingBudget=64000 → exceeds Max error
+		// Case 89: Antigravity to Antigravity, thinkingBudget=64000 → exceeds Max error
 		{
 			name:        "89",
-			from:        "gemini-cli",
+			from:        "antigravity",
 			to:          "antigravity",
 			model:       "antigravity-budget-model",
 			inputJSON:   `{"model":"antigravity-budget-model","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}}`,
@@ -2778,6 +2818,15 @@ func getTestModels() []*registry.ModelInfo {
 			Thinking:    &registry.ThinkingSupport{Min: 128, Max: 32768, Levels: []string{"low", "high"}, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		{
+			ID:          "gemini-zero-mixed-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "test",
+			Type:        "gemini",
+			DisplayName: "Gemini Zero Mixed Model",
+			Thinking:    &registry.ThinkingSupport{Min: 1, Max: 65535, Levels: []string{"minimal", "low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
 			ID:          "claude-budget-model",
 			Object:      "model",
 			Created:     1700000000,
@@ -2814,9 +2863,27 @@ func getTestModels() []*registry.ModelInfo {
 			Object:      "model",
 			Created:     1700000000,
 			OwnedBy:     "test",
-			Type:        "gemini-cli",
+			Type:        "antigravity",
 			DisplayName: "Antigravity Budget Model",
 			Thinking:    &registry.ThinkingSupport{Min: 128, Max: 20000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:          "kimi-level-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "moonshot",
+			Type:        "kimi",
+			DisplayName: "Kimi Level Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:          "xai-level-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "xai",
+			Type:        "xai",
+			DisplayName: "xAI Level Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: false},
 		},
 		{
 			ID:          "no-thinking-model",
@@ -2851,6 +2918,12 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 
 			translateTo := tc.to
 			applyTo := tc.to
+			switch applyTo {
+			case "kimi":
+				translateTo = "openai"
+			case "xai":
+				translateTo = "codex"
+			}
 
 			body := sdktranslator.TranslateRequest(
 				sdktranslator.FromString(tc.from),
@@ -2880,8 +2953,6 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				switch tc.to {
 				case "gemini":
 					hasThinking = gjson.GetBytes(body, "generationConfig.thinkingConfig").Exists()
-				case "gemini-cli":
-					hasThinking = gjson.GetBytes(body, "request.generationConfig.thinkingConfig").Exists()
 				case "antigravity":
 					hasThinking = gjson.GetBytes(body, "request.generationConfig.thinkingConfig").Exists()
 				case "claude":
@@ -2916,9 +2987,9 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				assertField(tc.expectField2, tc.expectValue2)
 			}
 
-			if tc.includeThoughts != "" && (tc.to == "gemini" || tc.to == "gemini-cli" || tc.to == "antigravity") {
+			if tc.includeThoughts != "" && (tc.to == "gemini" || tc.to == "antigravity") {
 				path := "generationConfig.thinkingConfig.includeThoughts"
-				if tc.to == "gemini-cli" || tc.to == "antigravity" {
+				if tc.to == "antigravity" {
 					path = "request.generationConfig.thinkingConfig.includeThoughts"
 				}
 				itVal := gjson.GetBytes(body, path)

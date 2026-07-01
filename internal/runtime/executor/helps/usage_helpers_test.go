@@ -116,47 +116,37 @@ func TestParseOpenAIStreamUsageDeepSeekFinalChunk(t *testing.T) {
 	}
 }
 
-func TestParseGeminiCLIUsage_TopLevelUsageMetadata(t *testing.T) {
-	data := []byte(`{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,"thoughtsTokenCount":3,"totalTokenCount":21,"cachedContentTokenCount":5}}`)
-	detail := ParseGeminiCLIUsage(data)
-	if detail.InputTokens != 11 {
-		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 11)
+func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_read_input_tokens":7,"cache_creation_input_tokens":19514}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.InputTokens != 3085 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 3085)
 	}
-	if detail.OutputTokens != 7 {
-		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 7)
+	if detail.OutputTokens != 253 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 253)
 	}
-	if detail.ReasoningTokens != 3 {
-		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 3)
+	if detail.CacheReadTokens != 7 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 7)
 	}
-	if detail.TotalTokens != 21 {
-		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 21)
+	if detail.CacheCreationTokens != 19514 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 19514)
 	}
-	if detail.CachedTokens != 5 {
-		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 5)
+	if detail.CachedTokens != 7 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
 	}
-}
-
-func TestParseGeminiCLIStreamUsage_ResponseSnakeCaseUsageMetadata(t *testing.T) {
-	line := []byte(`data: {"response":{"usage_metadata":{"promptTokenCount":13,"candidatesTokenCount":2,"totalTokenCount":15}}}`)
-	detail, ok := ParseGeminiCLIStreamUsage(line)
-	if !ok {
-		t.Fatal("ParseGeminiCLIStreamUsage() ok = false, want true")
-	}
-	if detail.InputTokens != 13 {
-		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 13)
-	}
-	if detail.OutputTokens != 2 {
-		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 2)
-	}
-	if detail.TotalTokens != 15 {
-		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 15)
+	if detail.TotalTokens != 22859 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22859)
 	}
 }
 
-func TestParseGeminiCLIStreamUsage_IgnoresTrafficTypeOnlyUsageMetadata(t *testing.T) {
-	line := []byte(`data: {"response":{"usageMetadata":{"trafficType":"ON_DEMAND"}}}`)
-	if detail, ok := ParseGeminiCLIStreamUsage(line); ok {
-		t.Fatalf("ParseGeminiCLIStreamUsage() = (%+v, true), want false for traffic-only usage metadata", detail)
+func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_creation_input_tokens":19514}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.CachedTokens != 19514 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 19514)
+	}
+	if detail.TotalTokens != 22852 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22852)
 	}
 }
 
@@ -317,4 +307,16 @@ func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
 	if record.ReasoningEffort != "medium" {
 		t.Fatalf("reasoning effort = %q, want %q", record.ReasoningEffort, "medium")
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type TestUsageExecutor struct{}
+
+func (TestUsageExecutor) Identifier() string {
+	return "test-provider"
 }

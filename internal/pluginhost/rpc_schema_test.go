@@ -81,7 +81,7 @@ func TestRPCSchedulerPickUsesAdapter(t *testing.T) {
 				Name:             "scheduler",
 				Version:          "1.0.0",
 				Author:           "test",
-				GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+				GitHubRepository: "https://github.com/NGLSL/CLIProxyAPI",
 			},
 			Capabilities: pluginapi.Capabilities{
 				Scheduler: schedulerFunc(func(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {

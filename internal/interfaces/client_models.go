@@ -3,10 +3,6 @@
 // such as AI service clients, API handlers, and data models.
 package interfaces
 
-import (
-	"time"
-)
-
 // GCPProject represents the response structure for a Google Cloud project list request.
 // This structure is used when fetching available projects for a Google Cloud account.
 type GCPProject struct {
@@ -30,7 +26,7 @@ type GCPProjectProjects struct {
 	// ProjectID is the unique string identifier for the project.
 	ProjectID string `json:"projectId"`
 
-	// LifecycleState indicates the current state of the project (e.g., "ACTIVE").
+	// LifecycleState indicates the current state of the project (e.g. "ACTIVE").
 	LifecycleState string `json:"lifecycleState"`
 
 	// Name is the human-readable name of the project.
@@ -38,9 +34,6 @@ type GCPProjectProjects struct {
 
 	// Labels contains metadata labels associated with the project.
 	Labels GCPProjectLabels `json:"labels"`
-
-	// CreateTime is the timestamp when the project was created.
-	CreateTime time.Time `json:"createTime"`
 }
 
 // Content represents a single message in a conversation, with a role and parts.

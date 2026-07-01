@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,7 +18,6 @@ import (
 
 func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
@@ -111,7 +112,6 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 
 func TestPatchAuthFileFields_HeadersEmptyMapIsNoop(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)

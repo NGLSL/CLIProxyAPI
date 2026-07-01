@@ -27,6 +27,9 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	Model       string
 	CreatedAt   int64
 	ToolNameMap map[string]string
+	// SawToolCall is true once at least one tool_use content_block_start has
+	// been emitted on the wire. Using raw upstream tool_calls presence here
+	// can produce stop_reason=tool_use with zero announced tool blocks.
 	SawToolCall bool
 	// Content accumulator for streaming
 	ContentAccumulator strings.Builder

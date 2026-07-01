@@ -910,6 +910,17 @@ func copyStringMap(in map[string]string) map[string]string {
 	return out
 }
 
+func cloneMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
 func quotaMap(value any) map[string]any {
 	if typed, ok := value.(map[string]any); ok {
 		return cloneMap(typed)

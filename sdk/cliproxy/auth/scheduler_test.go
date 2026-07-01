@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -33,6 +34,32 @@ func (schedulerTestExecutor) CountTokens(ctx context.Context, auth *Auth, req cl
 
 func (schedulerTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+type fakePluginScheduler struct {
+	resp     pluginapi.SchedulerPickResponse
+	handled  bool
+	err      error
+	calls    int
+	requests []pluginapi.SchedulerPickRequest
+	pick     func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
+}
+
+func (s *fakePluginScheduler) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+	s.calls++
+	s.requests = append(s.requests, req)
+	if s.pick != nil {
+		return s.pick(ctx, req)
+	}
+	return s.resp, s.handled, s.err
+}
+
+type inactivePluginScheduler struct {
+	fakePluginScheduler
+}
+
+func (s *inactivePluginScheduler) HasScheduler() bool {
+	return false
 }
 
 type trackingSelector struct {
@@ -152,37 +179,6 @@ func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	}
 }
 
-func TestSchedulerPick_GeminiVirtualParentUsesTwoLevelRotation(t *testing.T) {
-	t.Parallel()
-
-	registerSchedulerModels(t, "gemini-cli", "gemini-2.5-pro", "cred-a::proj-1", "cred-a::proj-2", "cred-b::proj-1", "cred-b::proj-2")
-	scheduler := newSchedulerForTest(
-		&RoundRobinSelector{},
-		&Auth{ID: "cred-a::proj-1", Provider: "gemini-cli", Attributes: map[string]string{"gemini_virtual_parent": "cred-a"}},
-		&Auth{ID: "cred-a::proj-2", Provider: "gemini-cli", Attributes: map[string]string{"gemini_virtual_parent": "cred-a"}},
-		&Auth{ID: "cred-b::proj-1", Provider: "gemini-cli", Attributes: map[string]string{"gemini_virtual_parent": "cred-b"}},
-		&Auth{ID: "cred-b::proj-2", Provider: "gemini-cli", Attributes: map[string]string{"gemini_virtual_parent": "cred-b"}},
-	)
-
-	wantParents := []string{"cred-a", "cred-b", "cred-a", "cred-b"}
-	wantIDs := []string{"cred-a::proj-1", "cred-b::proj-1", "cred-a::proj-2", "cred-b::proj-2"}
-	for index := range wantIDs {
-		got, errPick := scheduler.pickSingle(context.Background(), "gemini-cli", "gemini-2.5-pro", cliproxyexecutor.Options{}, nil)
-		if errPick != nil {
-			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
-		}
-		if got == nil {
-			t.Fatalf("pickSingle() #%d auth = nil", index)
-		}
-		if got.ID != wantIDs[index] {
-			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
-		}
-		if got.Attributes["gemini_virtual_parent"] != wantParents[index] {
-			t.Fatalf("pickSingle() #%d parent = %q, want %q", index, got.Attributes["gemini_virtual_parent"], wantParents[index])
-		}
-	}
-}
-
 func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T) {
 	t.Parallel()
 
@@ -197,6 +193,32 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
 	for index, wantID := range want {
 		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
+func TestSchedulerPick_XAIWebsocketPrefersWebsocketEnabledSubset(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "xai-http", Provider: "xai"},
+		&Auth{ID: "xai-ws-a", Provider: "xai", Attributes: map[string]string{"websockets": "true"}},
+		&Auth{ID: "xai-ws-b", Provider: "xai", Attributes: map[string]string{"websockets": "true"}},
+	)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	want := []string{"xai-ws-a", "xai-ws-b", "xai-ws-a"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(ctx, "xai", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
 			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
 		}

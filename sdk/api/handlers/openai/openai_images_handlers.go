@@ -26,6 +26,7 @@ import (
 
 const (
 	defaultImagesMainModel      = "gpt-5.4-mini"
+	gptImage15Model             = "gpt-image-1.5"
 	defaultImagesToolModel      = "gpt-image-2"
 	defaultXAIImagesModel       = "grok-imagine-image"
 	xaiImagesQualityModel       = "grok-imagine-image-quality"
@@ -54,6 +55,80 @@ type xaiImageResult struct {
 	URL           string
 	RevisedPrompt string
 	MimeType      string
+}
+
+type imagesStreamExecutionResult struct {
+	Data            <-chan []byte
+	UpstreamHeaders http.Header
+	Errs            <-chan *interfaces.ErrorMessage
+}
+
+func setImagesSSEHeaders(c *gin.Context) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+}
+
+func (h *OpenAIAPIHandler) newImagesStreamKeepAliveTicker() (*time.Ticker, <-chan time.Time) {
+	if h == nil || h.BaseAPIHandler == nil {
+		return nil, nil
+	}
+	interval := handlers.StreamingKeepAliveInterval(h.Cfg)
+	if interval <= 0 {
+		return nil, nil
+	}
+	ticker := time.NewTicker(interval)
+	return ticker, ticker.C
+}
+
+func writeImagesStreamKeepAlive(c *gin.Context, flusher http.Flusher) {
+	_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+	flusher.Flush()
+}
+
+func writeImagesStreamErrorEvent(c *gin.Context, errMsg *interfaces.ErrorMessage) {
+	if errMsg == nil {
+		return
+	}
+	status := http.StatusInternalServerError
+	if errMsg.StatusCode > 0 {
+		status = errMsg.StatusCode
+	}
+	errText := http.StatusText(status)
+	if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
+		errText = errMsg.Error.Error()
+	}
+	body := handlers.BuildErrorResponseBody(status, errText)
+	_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+}
+
+func (h *OpenAIAPIHandler) waitImagesStreamExecution(c *gin.Context, flusher http.Flusher, execute func() imagesStreamExecutionResult) (imagesStreamExecutionResult, bool, bool) {
+	resultChan := make(chan imagesStreamExecutionResult, 1)
+	go func() {
+		resultChan <- execute()
+	}()
+
+	keepAlive, keepAliveC := h.newImagesStreamKeepAliveTicker()
+	defer func() {
+		if keepAlive != nil {
+			keepAlive.Stop()
+		}
+	}()
+
+	streamStarted := false
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return imagesStreamExecutionResult{}, streamStarted, true
+		case result := <-resultChan:
+			return result, streamStarted, false
+		case <-keepAliveC:
+			setImagesSSEHeaders(c)
+			writeImagesStreamKeepAlive(c, flusher)
+			streamStarted = true
+		}
+	}
 }
 
 func (a *sseFrameAccumulator) AddChunk(chunk []byte) [][]byte {
@@ -1593,14 +1668,26 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 	if mainModel == "" {
 		mainModel = defaultImagesMainModel
 	}
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", mainModel, responsesReq, "")
-
-	setSSEHeaders := func() {
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
-		c.Header("Access-Control-Allow-Origin", "*")
+	execution, streamStarted, canceled := h.waitImagesStreamExecution(c, flusher, func() imagesStreamExecutionResult {
+		dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", mainModel, responsesReq, "")
+		return imagesStreamExecutionResult{Data: dataChan, UpstreamHeaders: upstreamHeaders, Errs: errChan}
+	})
+	if canceled {
+		cliCancel(c.Request.Context().Err())
+		return
 	}
+	dataChan := execution.Data
+	upstreamHeaders := execution.UpstreamHeaders
+	errChan := execution.Errs
+	keepAlive, keepAliveC := h.newImagesStreamKeepAliveTicker()
+	stopKeepAlive := func() {
+		if keepAlive != nil {
+			keepAlive.Stop()
+			keepAlive = nil
+			keepAliveC = nil
+		}
+	}
+	defer stopKeepAlive()
 
 	writeEvent := func(eventName string, dataJSON []byte) {
 		if strings.TrimSpace(eventName) != "" {
@@ -1610,7 +1697,7 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 		flusher.Flush()
 	}
 
-	// Peek for first chunk/error so we can still return a JSON error body.
+	// Peek for the first chunk/error while still allowing configured SSE heartbeats.
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -1621,7 +1708,12 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 				errChan = nil
 				continue
 			}
-			h.WriteErrorResponse(c, errMsg)
+			if streamStarted {
+				writeImagesStreamErrorEvent(c, errMsg)
+				flusher.Flush()
+			} else {
+				h.WriteErrorResponse(c, errMsg)
+			}
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -1630,7 +1722,8 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				setSSEHeaders()
+				stopKeepAlive()
+				setImagesSSEHeaders(c)
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = c.Writer.Write([]byte("\n"))
 				flusher.Flush()
@@ -1638,11 +1731,17 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 				return
 			}
 
-			setSSEHeaders()
+			stopKeepAlive()
+			setImagesSSEHeaders(c)
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
 			h.forwardImagesStream(cliCtx, c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, chunk, responseFormat, streamPrefix, writeEvent)
 			return
+		case <-keepAliveC:
+			setImagesSSEHeaders(c)
+			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			writeImagesStreamKeepAlive(c, flusher)
+			streamStarted = true
 		}
 	}
 }
@@ -1654,21 +1753,16 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
+	keepAlive, keepAliveC := h.newImagesStreamKeepAliveTicker()
+	defer func() {
+		if keepAlive != nil {
+			keepAlive.Stop()
+		}
+	}()
 
 	emitError := func(errMsg *interfaces.ErrorMessage) {
-		if errMsg == nil {
-			return
-		}
-		status := http.StatusInternalServerError
-		if errMsg.StatusCode > 0 {
-			status = errMsg.StatusCode
-		}
-		errText := http.StatusText(status)
-		if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
-			errText = errMsg.Error.Error()
-		}
-		body := handlers.BuildErrorResponseBody(status, errText)
-		writeEvent("error", body)
+		writeImagesStreamErrorEvent(c, errMsg)
+		flusher.Flush()
 	}
 
 	processFrame := func(frame []byte) (done bool) {
@@ -1768,6 +1862,8 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 					return
 				}
 			}
+		case <-keepAliveC:
+			writeImagesStreamKeepAlive(c, flusher)
 		}
 	}
 }

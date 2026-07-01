@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_CN.md) | 日本語
 
-CLI向けのOpenAI/Gemini/Claude/Codex互換APIインターフェースを提供するプロキシサーバーです。
+CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインターフェースを提供するプロキシサーバーです。
 
 OAuth経由でOpenAI Codex（GPTモデル）およびClaude Codeもサポートしています。
 
@@ -28,7 +28,7 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 </tr>
 <tr>
 <td width="180"><a href="https://www.aicodemirror.com/register?invitecode=TJNAIF"><img src="./assets/aicodemirror.png" alt="AICodeMirror" width="150"></a></td>
-<td>AICodeMirrorのスポンサーシップに感謝します！AICodeMirrorはClaude Code / Codex / Gemini CLI向けの公式高安定性リレーサービスを提供しており、エンタープライズグレードの同時接続、迅速な請求書発行、24時間365日の専任技術サポートを備えています。Claude Code / Codex / Geminiの公式チャネルが元の価格の38% / 2% / 9%で利用でき、チャージ時にはさらに割引があります！CLIProxyAPIユーザー向けの特別特典：<a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">こちらのリンク</a>から登録すると、初回チャージが20%割引になり、エンタープライズのお客様は最大25%割引を受けられます！</td>
+<td>AICodeMirrorのスポンサーシップに感謝します！AICodeMirrorはClaude Code / Codex / Gemini向けの公式高安定性リレーサービスを提供しており、エンタープライズグレードの同時接続、迅速な請求書発行、24時間365日の専任技術サポートを備えています。Claude Code / Codex / Geminiの公式チャネルが元の価格の38% / 2% / 9%で利用でき、チャージ時にはさらに割引があります！CLIProxyAPIユーザー向けの特別特典：<a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">こちらのリンク</a>から登録すると、初回チャージが20%割引になり、エンタープライズのお客様は最大25%割引を受けられます！</td>
 </tr>
 <tr>
 <td width="180"><a href="https://shop.bmoplus.com/?utm_source=github"><img src="./assets/bmoplus.png" alt="BmoPlus" width="150"></a></td>
@@ -47,20 +47,20 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 ## 概要
 
-- CLIモデル向けのOpenAI/Gemini/Claude互換APIエンドポイント
+- CLIモデル向けのOpenAI/Gemini/Claude/Grok互換APIエンドポイント
 - OAuthログインによるOpenAI Codexサポート（GPTモデル）
 - OAuthログインによるClaude Codeサポート
 - プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート
 - ストリーミングおよび非ストリーミングレスポンス
 - 関数呼び出し/ツールのサポート
 - マルチモーダル入力サポート（テキストと画像）
-- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude）
-- シンプルなCLI認証フロー（Gemini、OpenAI、Claude）
+- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude、Grok）
+- シンプルなCLI認証フロー（Gemini、OpenAI、Claude、Grok）
 - Generative Language APIキーのサポート
 - AI Studioビルドのマルチアカウント負荷分散
-- Gemini CLIのマルチアカウント負荷分散
 - Claude Codeのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
+- Grok Buildのマルチアカウント負荷分散
 - 設定によるOpenAI互換アップストリームプロバイダー（例：OpenRouter）
 - プロキシ埋め込み用の再利用可能なGo SDK（`docs/sdk-usage.md`を参照）
 
@@ -130,10 +130,6 @@ CLIProxyAPI OAuthを使用して複数のClaudeアカウントや代替モデル
 
 Claude、Gemini、OpenAI、Antigravityのサブスクリプションを統合し、リアルタイムのクォータ追跡とスマート自動フェイルオーバーを備えたmacOSネイティブのメニューバーアプリ。Claude Code、OpenCode、Droidなどのコーディングツール向け - APIキー不要
 
-### [CodMate](https://github.com/loocor/CodMate)
-
-CLI AIセッション（Codex、Claude Code、Gemini CLI）を管理するmacOS SwiftUIネイティブアプリ。統合プロバイダー管理、Gitレビュー、プロジェクト整理、グローバル検索、ターミナル統合機能を搭載。CLIProxyAPIと統合し、Codex、Claude、Gemini、AntigravityのOAuth認証を提供。単一のプロキシエンドポイントを通じた組み込みおよびサードパーティプロバイダーの再ルーティングに対応 - OAuthプロバイダーではAPIキー不要
-
 ### [ProxyPilot](https://github.com/Finesssee/ProxyPilot)
 
 TUI、システムトレイ、マルチプロバイダーOAuthを備えたWindows向けCLIProxyAPIフォーク - AIコーディングツール用、APIキー不要
@@ -156,7 +152,7 @@ PowerShellスクリプトで実装されたWindowsトレイアプリケーショ
 
 ### [霖君](https://github.com/wangdabaoqq/LinJun)
 
-霖君はAIプログラミングアシスタントを管理するクロスプラットフォームデスクトップアプリケーションで、macOS、Windows、Linuxシステムに対応。Claude Code、Gemini CLI、OpenAI Codexなどのコーディングツールを統合管理し、ローカルプロキシによるマルチアカウントクォータ追跡とワンクリック設定が可能
+霖君はAIプログラミングアシスタントを管理するクロスプラットフォームデスクトップアプリケーションで、macOS、Windows、Linuxシステムに対応。Claude Code、Gemini、OpenAI Codexなどのコーディングツールを統合管理し、ローカルプロキシによるマルチアカウントクォータ追跡とワンクリック設定が可能
 
 ### [CLIProxyAPI Dashboard](https://github.com/itsmylife44/cliproxyapi-dashboard)
 

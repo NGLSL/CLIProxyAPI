@@ -140,9 +140,13 @@ func (w *Watcher) refreshAuthState(force bool) {
 
 func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) []AuthUpdate {
 	newState := make(map[string]*coreauth.Auth, len(auths))
+	orderedIDs := make([]string, 0, len(auths))
 	for _, auth := range auths {
 		if auth == nil || auth.ID == "" {
 			continue
+		}
+		if _, exists := newState[auth.ID]; !exists {
+			orderedIDs = append(orderedIDs, auth.ID)
 		}
 		newState[auth.ID] = auth.Clone()
 	}
@@ -152,7 +156,11 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 			return nil
 		}
 		updates := make([]AuthUpdate, 0, len(newState))
-		for id, auth := range newState {
+		for _, id := range orderedIDs {
+			auth := newState[id]
+			if auth == nil {
+				continue
+			}
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: auth.Clone()})
 		}
 		return updates
@@ -162,7 +170,11 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 		return nil
 	}
 	updates := make([]AuthUpdate, 0, len(newState)+len(w.currentAuths))
-	for id, auth := range newState {
+	for _, id := range orderedIDs {
+		auth := newState[id]
+		if auth == nil {
+			continue
+		}
 		if existing, ok := w.currentAuths[id]; !ok {
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: auth.Clone()})
 		} else if force || !authEqual(existing, auth) {

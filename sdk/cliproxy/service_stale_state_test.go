@@ -127,6 +127,9 @@ func TestServiceConfigureUsageStatisticsEnabledFollowsConfig(t *testing.T) {
 	if !internalusage.StatisticsEnabled() {
 		t.Fatalf("StatisticsEnabled() = false, want true")
 	}
+	if service.cfg.SaveCooldownStatus {
+		t.Fatal("expected home overlay to force cooldown status persistence disabled")
+	}
 }
 
 func TestServiceRestoreUsageSnapshotMergesPersistedData(t *testing.T) {

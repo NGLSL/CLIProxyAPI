@@ -9,20 +9,20 @@ import (
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/interfaces"
 )
 
-// ModelExecutionRequest describes an internal model execution request issued by
-// plugin-host callbacks. EntryProtocol and ExitProtocol carry SDK translator
-// names such as "openai" or "gemini". When both protocols match (the common
-// case) the call behaves like a same-protocol request. When they differ, the
-// entry protocol is used as the source format because the local executor path
-// is single-protocol for now; protocol translation across the public API is
-// handled by the regular HTTP entrypoints.
-//
-// Headers and Query allow plugin callers to supply explicit forward values
-// which take precedence over anything derived from the caller's context.
-//
-// SkipInterceptorPluginID is retained for forwards-compatibility with plugins
-// built against the upstream ABI; it is currently a no-op on this fork because
-// per-request plugin interceptors are not yet wired into the executor pipeline.
+const (
+	modelExecutionMetadataSourceKey = "source"
+	modelExecutionInternalSource    = "plugin_host_model_callback"
+)
+
+type modelExecutionOptions struct {
+	Headers                 http.Header
+	Query                   url.Values
+	InternalSource          bool
+	SkipInterceptorPluginID string
+	SkipRouterPluginID      string
+}
+
+// ModelExecutionRequest describes an internal model execution request.
 type ModelExecutionRequest struct {
 	EntryProtocol           string
 	ExitProtocol            string
@@ -33,6 +33,7 @@ type ModelExecutionRequest struct {
 	Query                   url.Values
 	Alt                     string
 	SkipInterceptorPluginID string
+	SkipRouterPluginID      string
 }
 
 // ModelExecutionResponse describes a non-streaming internal model execution
@@ -59,25 +60,22 @@ type ModelExecutionChunk struct {
 	Err     *ModelExecutionStreamError
 }
 
-// ModelExecutionStreamError carries a terminal streaming error produced while
-// serving a ModelExecutionStream. It mirrors the most relevant fields of
-// interfaces.ErrorMessage so plugin callers can preserve status codes and
-// response headers when relaying errors.
+// ModelExecutionStreamError carries a JSON-friendly terminal stream error.
 type ModelExecutionStreamError struct {
-	StatusCode int
-	Headers    http.Header
-	Err        error
+	StatusCode int         `json:"status_code"`
+	Message    string      `json:"message"`
+	Headers    http.Header `json:"headers"`
 }
 
-// Error implements the error interface.
+// Error returns the stream error message or the HTTP status text.
 func (e *ModelExecutionStreamError) Error() string {
 	if e == nil {
 		return ""
 	}
-	if e.Err != nil {
-		return e.Err.Error()
+	if e.Message != "" {
+		return e.Message
 	}
-	return "model execution stream error"
+	return http.StatusText(e.StatusCode)
 }
 
 // modelExecutionForwardKey carries caller-supplied forward headers and query
@@ -117,23 +115,21 @@ func modelExecutionForwardFromContext(ctx context.Context) (http.Header, url.Val
 	return values.headers, values.query, true
 }
 
-// ExecuteModel performs a non-streaming internal model execution. It is the
-// entry point used by the plugin host model-execution callback. Plugin-supplied
-// headers/query take precedence over values derived from the caller's context.
-// The method is safe to call concurrently with regular API traffic.
+// ExecuteModel executes an internal non-streaming model request.
+// Host model callbacks are non-recursive for their caller: when
+// skip plugin IDs are set, that plugin's interceptors and router are skipped
+// for the nested model execution while other plugins may still run.
 func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionRequest) (ModelExecutionResponse, *interfaces.ErrorMessage) {
 	if req.Stream {
-		return ModelExecutionResponse{}, &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      errors.New("ExecuteModel called with Stream=true; use ExecuteModelStream instead"),
-		}
+		return ModelExecutionResponse{}, modelExecutionModeError("ExecuteModel requires Stream=false")
 	}
-	handlerType := req.EntryProtocol
-	if handlerType == "" {
-		handlerType = req.ExitProtocol
-	}
-	execCtx := WithModelExecutionForward(ctx, req.Headers, req.Query)
-	body, headers, errMsg := h.executeWithAuthManager(execCtx, handlerType, req.Model, cloneBytes(req.Body), req.Alt, false)
+	body, headers, errMsg := h.executeWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
+		Headers:                 req.Headers,
+		Query:                   req.Query,
+		InternalSource:          true,
+		SkipInterceptorPluginID: req.SkipInterceptorPluginID,
+		SkipRouterPluginID:      req.SkipRouterPluginID,
+	})
 	if errMsg != nil {
 		return ModelExecutionResponse{}, errMsg
 	}
@@ -144,58 +140,185 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 	}, nil
 }
 
-// ExecuteModelStream performs a streaming internal model execution. The
-// returned stream channel must be drained by the caller; the channel is closed
-// after the terminal chunk (payload or error) has been emitted.
+// ExecuteModelStream executes an internal streaming model request.
+// Host model callbacks are non-recursive for their caller: when
+// skip plugin IDs are set, that plugin's interceptors and router are skipped
+// for the nested model execution while other plugins may still run.
 func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecutionRequest) (ModelExecutionStream, *interfaces.ErrorMessage) {
 	if !req.Stream {
-		return ModelExecutionStream{}, &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      errors.New("ExecuteModelStream called with Stream=false; use ExecuteModel instead"),
-		}
+		return ModelExecutionStream{}, modelExecutionModeError("ExecuteModelStream requires Stream=true")
 	}
-	handlerType := req.EntryProtocol
-	if handlerType == "" {
-		handlerType = req.ExitProtocol
+	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
+		Headers:                 req.Headers,
+		Query:                   req.Query,
+		InternalSource:          true,
+		SkipInterceptorPluginID: req.SkipInterceptorPluginID,
+		SkipRouterPluginID:      req.SkipRouterPluginID,
+	})
+	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
+	if errMsg != nil {
+		return ModelExecutionStream{}, errMsg
 	}
-	execCtx := WithModelExecutionForward(ctx, req.Headers, req.Query)
-	rawChunks, headers, errChan := h.executeStreamWithAuthManager(execCtx, handlerType, req.Model, cloneBytes(req.Body), req.Alt, false)
-
-	wrapped := make(chan ModelExecutionChunk, 1)
-	stream := ModelExecutionStream{
+	return ModelExecutionStream{
 		StatusCode: http.StatusOK,
 		Headers:    cloneHeader(headers),
-		Chunks:     wrapped,
-	}
+		Chunks:     chunks,
+	}, nil
+}
 
-	// Bridge the raw []byte chunk stream into ModelExecutionChunk values and
-	// surface any terminal error from errChan as the final chunk. The goroutine
-	// keeps the lifetime of the underlying channels decoupled from the caller.
+func modelExecutionModeError(message string) *interfaces.ErrorMessage {
+	return &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New(message)}
+}
+
+func modelExecutionResponseProtocol(entryProtocol, exitProtocol string) string {
+	if exitProtocol == "" {
+		return entryProtocol
+	}
+	return exitProtocol
+}
+
+func modelExecutionHeaders(ctx context.Context, headers http.Header) http.Header {
+	if len(headers) > 0 {
+		return cloneHeader(headers)
+	}
+	if overrideHeaders, _, hasOverride := modelExecutionForwardFromContext(ctx); hasOverride && overrideHeaders != nil {
+		return cloneHeader(overrideHeaders)
+	}
+	return headersFromContext(ctx)
+}
+
+// modelExecutionQuery prefers an explicitly provided query and otherwise falls
+// back to the inbound query embedded in the request context. This lets model
+// routers observe query parameters for plain HTTP requests even when callers
+// do not populate execOptions.Query (mirrors modelExecutionHeaders).
+func modelExecutionQuery(ctx context.Context, query url.Values) url.Values {
+	if len(query) > 0 {
+		return cloneURLValues(query)
+	}
+	if _, overrideQuery, hasOverride := modelExecutionForwardFromContext(ctx); hasOverride && overrideQuery != nil {
+		return cloneURLValues(overrideQuery)
+	}
+	return queryFromContext(ctx)
+}
+
+func cloneURLValues(src url.Values) url.Values {
+	if src == nil {
+		return nil
+	}
+	dst := make(url.Values, len(src))
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
+	}
+	return dst
+}
+
+func addModelExecutionSourceMetadata(meta map[string]any, internalSource bool) {
+	if !internalSource || meta == nil {
+		return
+	}
+	meta[modelExecutionMetadataSourceKey] = modelExecutionInternalSource
+}
+
+func prepareModelExecutionStream(ctx context.Context, dataChan <-chan []byte, errChan <-chan *interfaces.ErrorMessage) (<-chan ModelExecutionChunk, *interfaces.ErrorMessage) {
+	pending, nextDataChan, nextErrChan, errMsg := receiveInitialModelExecutionChunk(ctx, dataChan, errChan)
+	if errMsg != nil {
+		return nil, errMsg
+	}
+	return wrapModelExecutionChunks(ctx, nextDataChan, nextErrChan, pending), nil
+}
+
+func receiveInitialModelExecutionChunk(ctx context.Context, dataChan <-chan []byte, errChan <-chan *interfaces.ErrorMessage) ([]ModelExecutionChunk, <-chan []byte, <-chan *interfaces.ErrorMessage, *interfaces.ErrorMessage) {
+	var done <-chan struct{}
+	if ctx != nil {
+		done = ctx.Done()
+	}
+	for dataChan != nil || errChan != nil {
+		select {
+		case payload, ok := <-dataChan:
+			if !ok {
+				dataChan = nil
+				continue
+			}
+			return []ModelExecutionChunk{{Payload: cloneBytes(payload)}}, dataChan, errChan, nil
+		case errMsg, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			if errMsg != nil {
+				return nil, dataChan, errChan, errMsg
+			}
+		case <-done:
+			return nil, dataChan, errChan, nil
+		}
+	}
+	return nil, dataChan, errChan, nil
+}
+
+func wrapModelExecutionChunks(ctx context.Context, dataChan <-chan []byte, errChan <-chan *interfaces.ErrorMessage, pending []ModelExecutionChunk) <-chan ModelExecutionChunk {
+	chunks := make(chan ModelExecutionChunk)
 	go func() {
-		defer close(wrapped)
-		for chunk := range rawChunks {
-			select {
-			case <-ctx.Done():
+		defer close(chunks)
+		var done <-chan struct{}
+		if ctx != nil {
+			done = ctx.Done()
+		}
+		for _, chunk := range pending {
+			if !sendModelExecutionChunk(ctx, chunks, chunk) {
 				return
-			case wrapped <- ModelExecutionChunk{Payload: cloneBytes(chunk)}:
 			}
 		}
-		// Drain the error channel non-blocking first; if nothing is ready the
-		// stream ended cleanly. We still wait once on the channel because the
-		// producer closes rawChunks before sending the terminal error.
-		if err, ok := <-errChan; ok && err != nil {
-			streamErr := &ModelExecutionStreamError{
-				StatusCode: err.StatusCode,
-				Headers:    cloneHeader(err.Addon),
-				Err:        err.Error,
-			}
+		for dataChan != nil || errChan != nil {
 			select {
-			case <-ctx.Done():
+			case <-done:
 				return
-			case wrapped <- ModelExecutionChunk{Err: streamErr}:
+			case payload, ok := <-dataChan:
+				if !ok {
+					dataChan = nil
+					continue
+				}
+				if !sendModelExecutionChunk(ctx, chunks, ModelExecutionChunk{Payload: cloneBytes(payload)}) {
+					return
+				}
+			case errMsg, ok := <-errChan:
+				if !ok {
+					errChan = nil
+					continue
+				}
+				if errMsg != nil {
+					_ = sendModelExecutionChunk(ctx, chunks, ModelExecutionChunk{Err: modelExecutionStreamErrorFromMessage(errMsg)})
+					return
+				}
 			}
 		}
 	}()
+	return chunks
+}
 
-	return stream, nil
+func modelExecutionStreamErrorFromMessage(errMsg *interfaces.ErrorMessage) *ModelExecutionStreamError {
+	if errMsg == nil {
+		return nil
+	}
+	message := ""
+	if errMsg.Error != nil {
+		message = errMsg.Error.Error()
+	}
+	return &ModelExecutionStreamError{
+		StatusCode: errMsg.StatusCode,
+		Message:    message,
+		Headers:    cloneHeader(errMsg.Addon),
+	}
+}
+
+func sendModelExecutionChunk(ctx context.Context, chunks chan<- ModelExecutionChunk, chunk ModelExecutionChunk) bool {
+	if ctx == nil {
+		chunks <- chunk
+		return true
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case chunks <- chunk:
+		return true
+	}
 }

@@ -13,7 +13,6 @@ import (
 func newAuthManager() *sdkAuth.Manager {
 	store := sdkAuth.GetTokenStore()
 	manager := sdkAuth.NewManager(store,
-		sdkAuth.NewGeminiAuthenticator(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewAntigravityAuthenticator(),

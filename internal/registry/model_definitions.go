@@ -20,7 +20,6 @@ type staticModelsJSON struct {
 	Claude      []*ModelInfo `json:"claude"`
 	Gemini      []*ModelInfo `json:"gemini"`
 	Vertex      []*ModelInfo `json:"vertex"`
-	GeminiCLI   []*ModelInfo `json:"gemini-cli"`
 	AIStudio    []*ModelInfo `json:"aistudio"`
 	CodexFree   []*ModelInfo `json:"codex-free"`
 	CodexTeam   []*ModelInfo `json:"codex-team"`
@@ -44,11 +43,6 @@ func GetGeminiModels() []*ModelInfo {
 // GetGeminiVertexModels returns Gemini model definitions for Vertex AI.
 func GetGeminiVertexModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Vertex)
-}
-
-// GetGeminiCLIModels returns Gemini model definitions for the Gemini CLI.
-func GetGeminiCLIModels() []*ModelInfo {
-	return cloneModelInfos(getModels().GeminiCLI)
 }
 
 // GetAIStudioModels returns model definitions for AI Studio.
@@ -86,6 +80,31 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// AntigravityWebSearchModelFor returns the Antigravity model that should run a
+// native web search request for modelID.
+func AntigravityWebSearchModelFor(modelID string) string {
+	modelID = normalizeAntigravityCapabilityModelID(modelID)
+	if modelID == "" {
+		return ""
+	}
+	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+		if model == nil {
+			continue
+		}
+		currentModelID := normalizeAntigravityCapabilityModelID(model.ID)
+		if currentModelID == "" {
+			continue
+		}
+		if currentModelID == modelID {
+			if model.SupportsWebSearch {
+				return currentModelID
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
 // GetXAIModels returns the standard xAI Grok model definitions.
 func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
@@ -102,6 +121,14 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+}
+
+func normalizeAntigravityCapabilityModelID(modelID string) string {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if open := strings.LastIndex(modelID, "("); open >= 0 && strings.HasSuffix(modelID, ")") {
+		modelID = strings.TrimSpace(modelID[:open])
+	}
+	return modelID
 }
 
 func codexBuiltinImageModelInfo() *ModelInfo {
@@ -252,7 +279,6 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - claude
 //   - gemini
 //   - vertex
-//   - gemini-cli
 //   - aistudio
 //   - codex
 //   - kimi
@@ -267,8 +293,6 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetGeminiModels()
 	case "vertex":
 		return GetGeminiVertexModels()
-	case "gemini-cli":
-		return GetGeminiCLIModels()
 	case "aistudio":
 		return GetAIStudioModels()
 	case "codex":
@@ -296,7 +320,6 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Claude,
 		data.Gemini,
 		data.Vertex,
-		data.GeminiCLI,
 		data.AIStudio,
 		data.CodexPro,
 		data.Kimi,

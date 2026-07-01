@@ -242,7 +242,7 @@ func TestRegisteredPluginsIncludesResourceMenus(t *testing.T) {
 	}
 	host := newHostWithRecords(capabilityRecord{
 		id:     "menu",
-		meta:   pluginapi.Metadata{Name: "menu", Version: "1.0.0", Author: "test", GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI"},
+		meta:   pluginapi.Metadata{Name: "menu", Version: "1.0.0", Author: "test", GitHubRepository: "https://github.com/NGLSL/CLIProxyAPI"},
 		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{ManagementAPI: plugin}},
 	})
 	host.RegisterManagementRoutes(context.Background(), nil)

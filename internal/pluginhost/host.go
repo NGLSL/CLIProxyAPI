@@ -137,6 +137,28 @@ func (h *Host) PluginLoaded(id string) bool {
 	return ok
 }
 
+// PluginBusy reports whether a plugin is currently held by the runtime.
+func (h *Host) PluginBusy(id string) bool {
+	// 当前 CPA 版本的 pluginhost 还没有源版 loading/retired 队列；
+	// Home 插件同步只需要知道插件动态库是否仍被持有，因此复用已加载判断即可。
+	return h.PluginLoaded(id)
+}
+
+// PluginRegistered reports whether a loaded plugin has completed its register callback.
+func (h *Host) PluginRegistered(id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	lp := h.loaded[id]
+	return lp != nil && lp.registered
+}
+
 func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	if h == nil {
 		return

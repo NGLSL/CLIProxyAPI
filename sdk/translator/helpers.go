@@ -7,14 +7,14 @@ func TranslateRequestByFormatName(from, to Format, model string, rawJSON []byte,
 	return TranslateRequest(from, to, model, rawJSON, stream)
 }
 
-// HasResponseTransformerByFormatName reports whether a response translator exists between two schemas.
-func HasResponseTransformerByFormatName(from, to Format) bool {
-	return HasResponseTransformer(from, to)
-}
-
 // HasRequestTransformerByFormatName reports whether a request translator exists between two schemas.
 func HasRequestTransformerByFormatName(from, to Format) bool {
 	return HasRequestTransformer(from, to)
+}
+
+// HasResponseTransformerByFormatName reports whether a response translator exists between two schemas.
+func HasResponseTransformerByFormatName(from, to Format) bool {
+	return HasResponseTransformer(from, to)
 }
 
 // HasStreamResponseTransformerByFormatName reports whether a streaming response translator exists between two schemas.

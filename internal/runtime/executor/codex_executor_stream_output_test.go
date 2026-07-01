@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 	_ "github.com/NGLSL/CLIProxyAPI/v7/internal/translator"

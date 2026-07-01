@@ -211,7 +211,7 @@ func validTestPlugin(name string) pluginapi.Plugin {
 			Name:             name,
 			Version:          "1.0.0",
 			Author:           "test",
-			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+			GitHubRepository: "https://github.com/NGLSL/CLIProxyAPI",
 		},
 		Capabilities: pluginapi.Capabilities{
 			UsagePlugin: testUsageCapability{},

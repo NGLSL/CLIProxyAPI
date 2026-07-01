@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	internalconfig "github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"

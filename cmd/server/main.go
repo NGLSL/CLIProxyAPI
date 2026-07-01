@@ -21,9 +21,11 @@ import (
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/cmd"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/home"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/logging"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/misc"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/store"
 	_ "github.com/NGLSL/CLIProxyAPI/v7/internal/translator"
@@ -178,7 +180,7 @@ func startRuntimeUpdaters(configFilePath string, localModel bool, homeEnabled bo
 	}
 }
 
-func runStandaloneTUI(cfg *config.Config, configFilePath string, password string) {
+func runStandaloneTUI(cfg *config.Config, configFilePath string, password string, pluginHost *pluginhost.Host) {
 	hook := tui.NewLogHook(2000)
 	hook.SetFormatter(&logging.LogFormatter{})
 	log.AddHook(hook)
@@ -207,7 +209,7 @@ func runStandaloneTUI(cfg *config.Config, configFilePath string, password string
 		password = fmt.Sprintf("tui-%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
 
-	cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+	cancel, done := cmd.StartServiceBackgroundWithPluginHost(cfg, configFilePath, password, pluginHost)
 
 	client := tui.NewClient(cfg.Port, password)
 	ready := false
@@ -242,10 +244,10 @@ func runStandaloneTUI(cfg *config.Config, configFilePath string, password string
 	<-done
 }
 
-func runTUI(cfg *config.Config, configFilePath string, password string, standalone bool, localModel bool) {
+func runTUI(cfg *config.Config, configFilePath string, password string, standalone bool, localModel bool, pluginHost *pluginhost.Host) {
 	if standalone {
 		startRuntimeUpdaters(configFilePath, localModel, cfg.Home.Enabled)
-		runStandaloneTUI(cfg, configFilePath, password)
+		runStandaloneTUI(cfg, configFilePath, password, pluginHost)
 		return
 	}
 
@@ -254,7 +256,7 @@ func runTUI(cfg *config.Config, configFilePath string, password string, standalo
 	}
 }
 
-func runApplicationMode(cfg *config.Config, configFilePath string, flagsState commandFlags, isCloudDeploy bool, configFileExists bool) {
+func runApplicationMode(cfg *config.Config, configFilePath string, flagsState commandFlags, isCloudDeploy bool, configFileExists bool, pluginHost *pluginhost.Host) {
 	if isCloudDeploy && !configFileExists {
 		cmd.WaitForCloudDeploy()
 		return
@@ -263,12 +265,12 @@ func runApplicationMode(cfg *config.Config, configFilePath string, flagsState co
 		log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
 	}
 	if flagsState.tuiMode {
-		runTUI(cfg, configFilePath, flagsState.password, flagsState.standalone, flagsState.localModel)
+		runTUI(cfg, configFilePath, flagsState.password, flagsState.standalone, flagsState.localModel, pluginHost)
 		return
 	}
 
 	startRuntimeUpdaters(configFilePath, flagsState.localModel, cfg.Home.Enabled)
-	cmd.StartService(cfg, configFilePath, flagsState.password)
+	cmd.StartServiceWithPluginHost(cfg, configFilePath, flagsState.password, pluginHost)
 }
 
 // main is the entry point of the application.
@@ -276,6 +278,13 @@ func runApplicationMode(cfg *config.Config, configFilePath string, flagsState co
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
 	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+
+	pluginHost := pluginhost.New()
+	if bootstrapCfg := loadPluginBootstrapConfig(pluginBootstrapConfigPath(os.Args[1:], DefaultConfigPath)); bootstrapCfg != nil {
+		// 插件可以在启动阶段注册自定义命令行参数，必须在 flag.Parse 前完成。
+		pluginHost.ApplyConfig(context.Background(), bootstrapCfg)
+		pluginHost.RegisterCommandLineFlags(context.Background(), flag.CommandLine)
+	}
 
 	flagsState := parseCommandFlags()
 
@@ -288,6 +297,8 @@ func main() {
 	var cfg *config.Config
 	var isCloudDeploy bool
 	var configLoadedFromHome bool
+	var homeClient *home.Client
+	var homePluginSyncReport homeplugins.SyncReport
 	var (
 		usePostgresStore     bool
 		pgStoreDSN           string
@@ -417,6 +428,12 @@ func main() {
 		}
 		homeClient := home.New(homeCfg)
 		defer homeClient.Close()
+		home.SetCurrent(homeClient)
+		defer home.ClearCurrent()
+		logging.SetHomeRequestLogClientProvider(func() logging.HomeRequestLogClient {
+			return homeClient
+		})
+		defer logging.SetHomeRequestLogClientProvider(nil)
 
 		ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
 		raw, errGetConfig := homeClient.GetConfig(ctxHomeConfig)
@@ -437,6 +454,20 @@ func main() {
 		parsed.Home = homeCfg
 		parsed.Port = 8317
 		parsed.UsageStatisticsEnabled = true
+		ctxHomePlugins, cancelHomePlugins := context.WithTimeout(context.Background(), 30*time.Second)
+		var errHomePlugins error
+		homePluginSyncReport, errHomePlugins = homeplugins.SyncWithReport(ctxHomePlugins, parsed, pluginHost)
+		cancelHomePlugins()
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, homeCfg.NodeID, homePluginSyncReport)
+		if errHomePlugins != nil {
+			log.Errorf("failed to fetch plugins from home: %v", errHomePlugins)
+		}
+		if errReportPlugins != nil {
+			log.Warnf("failed to report home plugin sync status: %v", errReportPlugins)
+		}
+		if errHomePlugins != nil {
+			return
+		}
 		cfg = parsed
 
 		if strings.TrimSpace(configPath) != "" {
@@ -633,6 +664,7 @@ func main() {
 	}
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	coreauth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)
@@ -662,10 +694,88 @@ func main() {
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
+	pluginHost.ApplyConfig(context.Background(), cfg)
+	if configLoadedFromHome {
+		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, cfg.Home.NodeID, homePluginSyncReport)
+		if errHomePluginLoad != nil {
+			log.Errorf("failed to load home plugins: %v", errHomePluginLoad)
+		}
+		if errReportPlugins != nil {
+			log.Warnf("failed to report home plugin load status: %v", errReportPlugins)
+		}
+		if errHomePluginLoad != nil {
+			return
+		}
+	}
+	if pluginHost.HasTriggeredCommandLineFlags() {
+		if exitCode, handled := pluginHost.ExecuteCommandLine(context.Background(), os.Args[0], os.Args[1:], configFilePath, flag.CommandLine); handled {
+			if exitCode != 0 {
+				os.Exit(exitCode)
+			}
+			return
+		}
+	}
 
 	if handleCommandMode(cfg, flagsState, options) {
 		return
 	}
 
-	runApplicationMode(cfg, configFilePath, flagsState, isCloudDeploy, configFileExists)
+	runApplicationMode(cfg, configFilePath, flagsState, isCloudDeploy, configFileExists, pluginHost)
+}
+
+func pluginBootstrapConfigPath(args []string, defaultPath string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			return defaultPluginBootstrapConfigPath(defaultPath)
+		case arg == "-config" || arg == "--config":
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return defaultPluginBootstrapConfigPath(defaultPath)
+		case strings.HasPrefix(arg, "-config="):
+			return strings.TrimPrefix(arg, "-config=")
+		case strings.HasPrefix(arg, "--config="):
+			return strings.TrimPrefix(arg, "--config=")
+		}
+	}
+	return defaultPluginBootstrapConfigPath(defaultPath)
+}
+
+func defaultPluginBootstrapConfigPath(defaultPath string) string {
+	if strings.TrimSpace(defaultPath) != "" {
+		return defaultPath
+	}
+	wd, errGetwd := os.Getwd()
+	if errGetwd != nil {
+		return "config.yaml"
+	}
+	return filepath.Join(wd, "config.yaml")
+}
+
+func loadPluginBootstrapConfig(path string) *config.Config {
+	raw, errReadFile := os.ReadFile(path)
+	if errReadFile != nil {
+		if !errors.Is(errReadFile, os.ErrNotExist) {
+			log.Warnf("failed to read plugin bootstrap config: %v", errReadFile)
+		}
+		cfg := &config.Config{}
+		cfg.NormalizePluginsConfig()
+		return cfg
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		cfg := &config.Config{}
+		cfg.NormalizePluginsConfig()
+		return cfg
+	}
+	cfg, errParseConfig := config.ParseConfigBytes(raw)
+	if errParseConfig != nil {
+		log.Warnf("failed to parse plugin bootstrap config: %v", errParseConfig)
+		cfg = &config.Config{}
+		cfg.NormalizePluginsConfig()
+		return cfg
+	}
+	return cfg
 }

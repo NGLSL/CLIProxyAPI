@@ -316,7 +316,8 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
-	auth.Attributes["path"] = path
+	auth.Attributes[cliproxyauth.AttributePath] = path
+	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceGit
 
 	if strings.TrimSpace(auth.FileName) == "" {
 		auth.FileName = auth.ID
@@ -473,12 +474,15 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 	}
 	id := s.idFor(path, baseDir)
 	auth := &cliproxyauth.Auth{
-		ID:               id,
-		Provider:         provider,
-		FileName:         id,
-		Label:            s.labelFor(metadata),
-		Status:           cliproxyauth.StatusActive,
-		Attributes:       map[string]string{"path": path},
+		ID:       id,
+		Provider: provider,
+		FileName: id,
+		Label:    s.labelFor(metadata),
+		Status:   cliproxyauth.StatusActive,
+		Attributes: map[string]string{
+			cliproxyauth.AttributePath:          path,
+			cliproxyauth.AttributeSourceBackend: cliproxyauth.AuthSourceGit,
+		},
 		Metadata:         metadata,
 		CreatedAt:        info.ModTime(),
 		UpdatedAt:        info.ModTime(),
