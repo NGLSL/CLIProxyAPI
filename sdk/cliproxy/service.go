@@ -799,6 +799,8 @@ func normaliseUsageSnapshot(snapshot internalusage.StatisticsSnapshot) internalu
 func cloneUsageAPISnapshot(snapshot internalusage.APISnapshot) internalusage.APISnapshot {
 	cloned := internalusage.APISnapshot{
 		TotalRequests: snapshot.TotalRequests,
+		SuccessCount:  snapshot.SuccessCount,
+		FailureCount:  snapshot.FailureCount,
 		TotalTokens:   snapshot.TotalTokens,
 		Models:        make(map[string]internalusage.ModelSnapshot, len(snapshot.Models)),
 	}
@@ -811,6 +813,8 @@ func cloneUsageAPISnapshot(snapshot internalusage.APISnapshot) internalusage.API
 func mergeUsageAPISnapshots(base, delta internalusage.APISnapshot) internalusage.APISnapshot {
 	merged := cloneUsageAPISnapshot(base)
 	merged.TotalRequests += delta.TotalRequests
+	merged.SuccessCount += delta.SuccessCount
+	merged.FailureCount += delta.FailureCount
 	merged.TotalTokens += delta.TotalTokens
 	if merged.Models == nil {
 		merged.Models = make(map[string]internalusage.ModelSnapshot, len(delta.Models))
@@ -824,6 +828,8 @@ func mergeUsageAPISnapshots(base, delta internalusage.APISnapshot) internalusage
 func cloneUsageModelSnapshot(snapshot internalusage.ModelSnapshot) internalusage.ModelSnapshot {
 	return internalusage.ModelSnapshot{
 		TotalRequests: snapshot.TotalRequests,
+		SuccessCount:  snapshot.SuccessCount,
+		FailureCount:  snapshot.FailureCount,
 		TotalTokens:   snapshot.TotalTokens,
 		Details:       copyUsageDetails(snapshot.Details),
 	}
@@ -832,6 +838,8 @@ func cloneUsageModelSnapshot(snapshot internalusage.ModelSnapshot) internalusage
 func mergeUsageModelSnapshots(base, delta internalusage.ModelSnapshot) internalusage.ModelSnapshot {
 	return internalusage.ModelSnapshot{
 		TotalRequests: base.TotalRequests + delta.TotalRequests,
+		SuccessCount:  base.SuccessCount + delta.SuccessCount,
+		FailureCount:  base.FailureCount + delta.FailureCount,
 		TotalTokens:   base.TotalTokens + delta.TotalTokens,
 		Details:       mergeUsageDetails(base.Details, delta.Details),
 	}

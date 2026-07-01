@@ -81,6 +81,8 @@ type RequestStatistics struct {
 // apiStats holds aggregated metrics for a single API key.
 type apiStats struct {
 	TotalRequests int64
+	SuccessCount  int64
+	FailureCount  int64
 	TotalTokens   int64
 	Models        map[string]*modelStats
 }
@@ -88,6 +90,8 @@ type apiStats struct {
 // modelStats holds aggregated metrics for a specific model within an API.
 type modelStats struct {
 	TotalRequests int64
+	SuccessCount  int64
+	FailureCount  int64
 	TotalTokens   int64
 	Details       []RequestDetail
 }
@@ -138,6 +142,8 @@ type StatisticsSnapshot struct {
 // APISnapshot summarises metrics for a single API key.
 type APISnapshot struct {
 	TotalRequests int64                    `json:"total_requests"`
+	SuccessCount  int64                    `json:"success_count"`
+	FailureCount  int64                    `json:"failure_count"`
 	TotalTokens   int64                    `json:"total_tokens"`
 	Models        map[string]ModelSnapshot `json:"models"`
 }
@@ -145,6 +151,8 @@ type APISnapshot struct {
 // ModelSnapshot summarises metrics for a specific model.
 type ModelSnapshot struct {
 	TotalRequests int64           `json:"total_requests"`
+	SuccessCount  int64           `json:"success_count"`
+	FailureCount  int64           `json:"failure_count"`
 	TotalTokens   int64           `json:"total_tokens"`
 	Details       []RequestDetail `json:"details"`
 }
@@ -257,6 +265,11 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
 	stats.TotalRequests++
+	if detail.Failed {
+		stats.FailureCount++
+	} else {
+		stats.SuccessCount++
+	}
 	stats.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue, ok := stats.Models[model]
 	if !ok {
@@ -264,6 +277,11 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 		stats.Models[model] = modelStatsValue
 	}
 	modelStatsValue.TotalRequests++
+	if detail.Failed {
+		modelStatsValue.FailureCount++
+	} else {
+		modelStatsValue.SuccessCount++
+	}
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
 	if len(modelStatsValue.Details) > maxRequestDetailsPerModel {
@@ -290,6 +308,8 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	for apiName, stats := range s.apis {
 		apiSnapshot := APISnapshot{
 			TotalRequests: stats.TotalRequests,
+			SuccessCount:  stats.SuccessCount,
+			FailureCount:  stats.FailureCount,
 			TotalTokens:   stats.TotalTokens,
 			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
 		}
@@ -298,6 +318,8 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			copy(requestDetails, modelStatsValue.Details)
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
+				SuccessCount:  modelStatsValue.SuccessCount,
+				FailureCount:  modelStatsValue.FailureCount,
 				TotalTokens:   modelStatsValue.TotalTokens,
 				Details:       requestDetails,
 			}
@@ -399,8 +421,8 @@ func buildRestoredStatistics(snapshot StatisticsSnapshot) restoredStatistics {
 
 	var apiTotalRequests int64
 	var apiTotalTokens int64
-	var detailSuccessCount int64
-	var detailFailureCount int64
+	var apiSuccessCount int64
+	var apiFailureCount int64
 
 	for apiName, apiSnapshot := range snapshot.APIs {
 		apiName = strings.TrimSpace(apiName)
@@ -411,6 +433,8 @@ func buildRestoredStatistics(snapshot StatisticsSnapshot) restoredStatistics {
 		api := &apiStats{Models: make(map[string]*modelStats)}
 		var modelTotalRequests int64
 		var modelTotalTokens int64
+		var modelSuccessCount int64
+		var modelFailureCount int64
 
 		for modelName, modelSnapshot := range apiSnapshot.Models {
 			modelName = strings.TrimSpace(modelName)
@@ -420,29 +444,58 @@ func buildRestoredStatistics(snapshot StatisticsSnapshot) restoredStatistics {
 
 			modelStatsValue, detailRequests, detailTokens, successCount, failureCount := restoreModelSnapshot(modelSnapshot, detailRequestsByDay, detailRequestsByHour, detailTokensByDay, detailTokensByHour)
 			restored.detailCount += int64(len(modelStatsValue.Details))
-			detailSuccessCount += successCount
-			detailFailureCount += failureCount
 
 			modelStatsValue.TotalRequests = maxNonNegative(modelSnapshot.TotalRequests, detailRequests)
 			modelStatsValue.TotalTokens = maxNonNegative(modelSnapshot.TotalTokens, detailTokens)
+			// 新快照会持久化模型级成功/失败；老快照没有该字段时，继续从保留明细推导。
+			// 如果明细因为窗口裁剪少于总请求数，缺口按成功请求补齐，避免恢复后成功率被裁剪窗口拖低。
+			modelStatsValue.SuccessCount, modelStatsValue.FailureCount = normalizeOutcomeCounts(
+				modelSnapshot.SuccessCount,
+				modelSnapshot.FailureCount,
+				modelStatsValue.TotalRequests,
+				successCount,
+				failureCount,
+			)
+			if modelStatsValue.SuccessCount+modelStatsValue.FailureCount > modelStatsValue.TotalRequests {
+				modelStatsValue.TotalRequests = modelStatsValue.SuccessCount + modelStatsValue.FailureCount
+			}
 			api.Models[modelName] = modelStatsValue
 
 			modelTotalRequests += modelStatsValue.TotalRequests
 			modelTotalTokens += modelStatsValue.TotalTokens
+			modelSuccessCount += modelStatsValue.SuccessCount
+			modelFailureCount += modelStatsValue.FailureCount
 		}
 
 		api.TotalRequests = maxNonNegative(apiSnapshot.TotalRequests, modelTotalRequests)
 		api.TotalTokens = maxNonNegative(apiSnapshot.TotalTokens, modelTotalTokens)
+		api.SuccessCount, api.FailureCount = normalizeOutcomeCounts(
+			apiSnapshot.SuccessCount,
+			apiSnapshot.FailureCount,
+			api.TotalRequests,
+			modelSuccessCount,
+			modelFailureCount,
+		)
+		if api.SuccessCount+api.FailureCount > api.TotalRequests {
+			api.TotalRequests = api.SuccessCount + api.FailureCount
+		}
 		restored.apis[apiName] = api
 
 		apiTotalRequests += api.TotalRequests
 		apiTotalTokens += api.TotalTokens
+		apiSuccessCount += api.SuccessCount
+		apiFailureCount += api.FailureCount
 	}
 
 	restored.totalRequests = maxNonNegative(snapshot.TotalRequests, apiTotalRequests)
 	restored.totalTokens = maxNonNegative(snapshot.TotalTokens, apiTotalTokens)
-	restored.successCount = maxNonNegative(snapshot.SuccessCount, detailSuccessCount)
-	restored.failureCount = maxNonNegative(snapshot.FailureCount, detailFailureCount)
+	restored.successCount, restored.failureCount = normalizeOutcomeCounts(
+		snapshot.SuccessCount,
+		snapshot.FailureCount,
+		restored.totalRequests,
+		apiSuccessCount,
+		apiFailureCount,
+	)
 	if restored.successCount+restored.failureCount < restored.totalRequests {
 		restored.successCount += restored.totalRequests - restored.successCount - restored.failureCount
 	}
@@ -456,6 +509,20 @@ func buildRestoredStatistics(snapshot StatisticsSnapshot) restoredStatistics {
 	mergeMaxHourMap(restored.tokensByHour, detailTokensByHour)
 
 	return restored
+}
+
+func normalizeOutcomeCounts(success, failure, totalRequests, fallbackSuccess, fallbackFailure int64) (int64, int64) {
+	success = normaliseNonNegative(success)
+	failure = normaliseNonNegative(failure)
+	if success+failure == 0 && fallbackSuccess+fallbackFailure > 0 {
+		success = normaliseNonNegative(fallbackSuccess)
+		failure = normaliseNonNegative(fallbackFailure)
+	}
+	totalRequests = normaliseNonNegative(totalRequests)
+	if success+failure < totalRequests {
+		success += totalRequests - success - failure
+	}
+	return success, failure
 }
 
 func restoreModelSnapshot(

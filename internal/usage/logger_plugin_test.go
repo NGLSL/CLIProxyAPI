@@ -241,11 +241,23 @@ func TestRequestStatisticsRecordTrimsDetailsButKeepsAggregateTotals(t *testing.T
 	if apiSnapshot.TotalTokens != expectedTotalTokens {
 		t.Fatalf("api total tokens = %d, want %d", apiSnapshot.TotalTokens, expectedTotalTokens)
 	}
+	if apiSnapshot.SuccessCount != expectedSuccessCount {
+		t.Fatalf("api success count = %d, want %d", apiSnapshot.SuccessCount, expectedSuccessCount)
+	}
+	if apiSnapshot.FailureCount != expectedFailureCount {
+		t.Fatalf("api failure count = %d, want %d", apiSnapshot.FailureCount, expectedFailureCount)
+	}
 	if modelSnapshot.TotalRequests != int64(maxRequestDetailsPerModel+25) {
 		t.Fatalf("model total requests = %d, want %d", modelSnapshot.TotalRequests, maxRequestDetailsPerModel+25)
 	}
 	if modelSnapshot.TotalTokens != expectedTotalTokens {
 		t.Fatalf("model total tokens = %d, want %d", modelSnapshot.TotalTokens, expectedTotalTokens)
+	}
+	if modelSnapshot.SuccessCount != expectedSuccessCount {
+		t.Fatalf("model success count = %d, want %d", modelSnapshot.SuccessCount, expectedSuccessCount)
+	}
+	if modelSnapshot.FailureCount != expectedFailureCount {
+		t.Fatalf("model failure count = %d, want %d", modelSnapshot.FailureCount, expectedFailureCount)
 	}
 }
 
@@ -319,11 +331,23 @@ func TestRequestStatisticsRestoreSnapshotKeepsAggregateTotalsBeyondDetailWindow(
 	if apiSnapshot.TotalTokens != expectedTotalTokens {
 		t.Fatalf("api total tokens = %d, want %d", apiSnapshot.TotalTokens, expectedTotalTokens)
 	}
+	if apiSnapshot.SuccessCount != expectedSuccessCount {
+		t.Fatalf("api success count = %d, want %d", apiSnapshot.SuccessCount, expectedSuccessCount)
+	}
+	if apiSnapshot.FailureCount != expectedFailureCount {
+		t.Fatalf("api failure count = %d, want %d", apiSnapshot.FailureCount, expectedFailureCount)
+	}
 	if modelSnapshot.TotalRequests != int64(maxRequestDetailsPerModel+25) {
 		t.Fatalf("model total requests = %d, want %d", modelSnapshot.TotalRequests, maxRequestDetailsPerModel+25)
 	}
 	if modelSnapshot.TotalTokens != expectedTotalTokens {
 		t.Fatalf("model total tokens = %d, want %d", modelSnapshot.TotalTokens, expectedTotalTokens)
+	}
+	if modelSnapshot.SuccessCount != expectedSuccessCount {
+		t.Fatalf("model success count = %d, want %d", modelSnapshot.SuccessCount, expectedSuccessCount)
+	}
+	if modelSnapshot.FailureCount != expectedFailureCount {
+		t.Fatalf("model failure count = %d, want %d", modelSnapshot.FailureCount, expectedFailureCount)
 	}
 	if got := len(modelSnapshot.Details); got != maxRequestDetailsPerModel {
 		t.Fatalf("details len = %d, want %d", got, maxRequestDetailsPerModel)
