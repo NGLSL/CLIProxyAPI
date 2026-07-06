@@ -11,6 +11,9 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+// AuthSelectionModelMetadataKey overrides the model used only for auth selection.
+const AuthSelectionModelMetadataKey = "auth_selection_model"
+
 // ReasoningEffortMetadataKey stores the client-requested reasoning effort for usage logs.
 const ReasoningEffortMetadataKey = "reasoning_effort"
 

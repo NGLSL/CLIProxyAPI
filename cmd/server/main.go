@@ -17,6 +17,7 @@ import (
 	"time"
 
 	configaccess "github.com/NGLSL/CLIProxyAPI/v7/internal/access/config_access"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/api"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/cmd"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
@@ -27,6 +28,7 @@ import (
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/misc"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/safemode"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/store"
 	_ "github.com/NGLSL/CLIProxyAPI/v7/internal/translator"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/tui"
@@ -73,6 +75,16 @@ type commandFlags struct {
 	tuiMode                     bool
 	standalone                  bool
 	localModel                  bool
+}
+
+func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode bool) bool {
+	if cfg == nil || commandMode || homeMode || cloudConfigMissing {
+		return false
+	}
+	if tuiMode && !standalone {
+		return false
+	}
+	return safemode.HasExampleAPIKeys(cfg.APIKeys)
 }
 
 func configureFlagUsage() {
@@ -180,7 +192,7 @@ func startRuntimeUpdaters(configFilePath string, localModel bool, homeEnabled bo
 	}
 }
 
-func runStandaloneTUI(cfg *config.Config, configFilePath string, password string, pluginHost *pluginhost.Host) {
+func runStandaloneTUI(cfg *config.Config, configFilePath string, password string, pluginHost *pluginhost.Host, serverOptions ...api.ServerOption) {
 	hook := tui.NewLogHook(2000)
 	hook.SetFormatter(&logging.LogFormatter{})
 	log.AddHook(hook)
@@ -209,7 +221,7 @@ func runStandaloneTUI(cfg *config.Config, configFilePath string, password string
 		password = fmt.Sprintf("tui-%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
 
-	cancel, done := cmd.StartServiceBackgroundWithPluginHost(cfg, configFilePath, password, pluginHost)
+	cancel, done := cmd.StartServiceBackgroundWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 
 	client := tui.NewClient(cfg.Port, password)
 	ready := false
@@ -244,10 +256,10 @@ func runStandaloneTUI(cfg *config.Config, configFilePath string, password string
 	<-done
 }
 
-func runTUI(cfg *config.Config, configFilePath string, password string, standalone bool, localModel bool, pluginHost *pluginhost.Host) {
+func runTUI(cfg *config.Config, configFilePath string, password string, standalone bool, localModel bool, pluginHost *pluginhost.Host, serverOptions ...api.ServerOption) {
 	if standalone {
 		startRuntimeUpdaters(configFilePath, localModel, cfg.Home.Enabled)
-		runStandaloneTUI(cfg, configFilePath, password, pluginHost)
+		runStandaloneTUI(cfg, configFilePath, password, pluginHost, serverOptions...)
 		return
 	}
 
@@ -256,7 +268,7 @@ func runTUI(cfg *config.Config, configFilePath string, password string, standalo
 	}
 }
 
-func runApplicationMode(cfg *config.Config, configFilePath string, flagsState commandFlags, isCloudDeploy bool, configFileExists bool, pluginHost *pluginhost.Host) {
+func runApplicationMode(cfg *config.Config, configFilePath string, flagsState commandFlags, isCloudDeploy bool, configFileExists bool, pluginHost *pluginhost.Host, serverOptions ...api.ServerOption) {
 	if isCloudDeploy && !configFileExists {
 		cmd.WaitForCloudDeploy()
 		return
@@ -265,12 +277,12 @@ func runApplicationMode(cfg *config.Config, configFilePath string, flagsState co
 		log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
 	}
 	if flagsState.tuiMode {
-		runTUI(cfg, configFilePath, flagsState.password, flagsState.standalone, flagsState.localModel, pluginHost)
+		runTUI(cfg, configFilePath, flagsState.password, flagsState.standalone, flagsState.localModel, pluginHost, serverOptions...)
 		return
 	}
 
 	startRuntimeUpdaters(configFilePath, flagsState.localModel, cfg.Home.Enabled)
-	cmd.StartServiceWithPluginHost(cfg, configFilePath, flagsState.password, pluginHost)
+	cmd.StartServiceWithPluginHost(cfg, configFilePath, flagsState.password, pluginHost, serverOptions...)
 }
 
 // main is the entry point of the application.
@@ -690,6 +702,16 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
+	commandMode := flagsState.vertexImport != "" || flagsState.login || flagsState.antigravityLogin || flagsState.codexLogin || flagsState.codexDeviceLogin || flagsState.claudeLogin || flagsState.kimiLogin || flagsState.xaiLogin
+	cloudConfigMissing := isCloudDeploy && !configFileExists
+	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
+	serverOptions := []api.ServerOption(nil)
+	if shouldEnableExampleAPIKeySafeMode(cfg, commandMode, flagsState.tuiMode, flagsState.standalone, cloudConfigMissing, homeMode) {
+		matches := safemode.ExampleAPIKeys(cfg.APIKeys)
+		log.WithField("api_keys", strings.Join(matches, ",")).Error("unsafe example API key configured; proxy API endpoints disabled until api-keys is updated")
+		serverOptions = append(serverOptions, api.WithExampleAPIKeySafeMode())
+	}
+
 	registerSharedTokenStore(usePostgresStore, pgStoreInst, useObjectStore, objectStoreInst, useGitStore, gitStoreInst)
 
 	// Register built-in access providers before constructing services.
@@ -721,7 +743,7 @@ func main() {
 		return
 	}
 
-	runApplicationMode(cfg, configFilePath, flagsState, isCloudDeploy, configFileExists, pluginHost)
+	runApplicationMode(cfg, configFilePath, flagsState, isCloudDeploy, configFileExists, pluginHost, serverOptions...)
 }
 
 func pluginBootstrapConfigPath(args []string, defaultPath string) string {

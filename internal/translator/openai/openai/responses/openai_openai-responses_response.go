@@ -1020,7 +1020,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					st.MsgRefusalBuf[idx].WriteString(refusal.String())
 				}
 
-				if rc := delta.Get("reasoning_content"); rc.Exists() && rc.String() != "" {
+				rc := delta.Get("reasoning_content")
+				if !rc.Exists() || rc.String() == "" {
+					rc = delta.Get("reasoning")
+				}
+				if rc.Exists() && rc.String() != "" {
 					if st.ReasoningID == "" {
 						st.ReasoningID = fmt.Sprintf("rs_%s_%d", st.ResponseID, idx)
 						st.ReasoningIndex = allocOutputIndex()

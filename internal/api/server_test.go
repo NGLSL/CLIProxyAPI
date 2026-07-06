@@ -11,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	managementHandlers "github.com/NGLSL/CLIProxyAPI/v7/internal/api/handlers/management"
 	proxyconfig "github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 	internallogging "github.com/NGLSL/CLIProxyAPI/v7/internal/logging"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/usage"
 	sdkaccess "github.com/NGLSL/CLIProxyAPI/v7/sdk/access"
@@ -157,13 +160,387 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
-func TestAmpProviderModelRoutes(t *testing.T) {
-	testCases := []struct {
-		name         string
-		path         string
-		wantStatus   int
-		wantContains string
-	}{
+func TestManagementResponseExposesPluginSupportHeaderForCORS(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	req.Header.Set("Origin", "http://127.0.0.1:5173")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-CPA-SUPPORT-PLUGIN"); got != pluginhost.SupportPluginHeaderValue() {
+		t.Fatalf("X-CPA-SUPPORT-PLUGIN = %q, want %q", got, pluginhost.SupportPluginHeaderValue())
+	}
+
+	exposedHeaders := make(map[string]struct{})
+	for _, headerName := range strings.Split(rr.Header().Get("Access-Control-Expose-Headers"), ",") {
+		headerName = strings.ToLower(strings.TrimSpace(headerName))
+		if headerName != "" {
+			exposedHeaders[headerName] = struct{}{}
+		}
+	}
+	for _, headerName := range corsExposedResponseHeaders {
+		if _, ok := exposedHeaders[strings.ToLower(headerName)]; !ok {
+			t.Fatalf("Access-Control-Expose-Headers missing %s: %q", headerName, rr.Header().Get("Access-Control-Expose-Headers"))
+		}
+	}
+}
+
+func TestOAuthCallbackRouteSkipsManagementKeyMiddleware(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	state := "server-plugin-oauth-state"
+	if errRegister := managementHandlers.RegisterPluginOAuthSession(state, "gemini-cli", nil); errRegister != nil {
+		t.Fatalf("register plugin oauth session: %v", errRegister)
+	}
+	defer managementHandlers.CompleteOAuthSession(state)
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/oauth-callback?state="+state+"&code=test-code", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	callbackPath := filepath.Join(server.cfg.AuthDir, ".oauth-gemini-cli-"+state+".oauth")
+	if _, errRead := os.ReadFile(callbackPath); errRead != nil {
+		t.Fatalf("expected callback file to be written without management key: %v", errRead)
+	}
+}
+
+func TestNewServerWithPluginHostInjectsHandlerInterceptors(t *testing.T) {
+	host := pluginhost.New()
+	server := newTestServerWithOptions(t, WithPluginHost(host))
+
+	if server.handlers == nil {
+		t.Fatal("server handlers = nil")
+	}
+	got, ok := server.handlers.PluginHost.(*pluginhost.Host)
+	if !ok || got != host {
+		t.Fatalf("handler plugin host = %#v, want configured host", server.handlers.PluginHost)
+	}
+}
+
+func TestNewServerWithoutPluginHostLeavesHandlerInterceptorsDisabled(t *testing.T) {
+	server := newTestServer(t)
+
+	if server.handlers == nil {
+		t.Fatal("server handlers = nil")
+	}
+	if server.handlers.PluginHost != nil {
+		t.Fatalf("handler plugin host = %#v, want nil", server.handlers.PluginHost)
+	}
+}
+
+func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	prevQueueEnabled := redisqueue.Enabled()
+	redisqueue.SetEnabled(false)
+	t.Cleanup(func() {
+		redisqueue.SetEnabled(false)
+		redisqueue.SetEnabled(prevQueueEnabled)
+	})
+
+	server := newTestServer(t)
+
+	redisqueue.Enqueue([]byte(`{"id":1}`))
+	redisqueue.Enqueue([]byte(`{"id":2}`))
+
+	missingKeyReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
+	missingKeyRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(missingKeyRR, missingKeyReq)
+	if missingKeyRR.Code != http.StatusUnauthorized {
+		t.Fatalf("missing key status = %d, want %d body=%s", missingKeyRR.Code, http.StatusUnauthorized, missingKeyRR.Body.String())
+	}
+
+	legacyReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage?count=2", nil)
+	legacyReq.Header.Set("Authorization", "Bearer test-management-key")
+	legacyRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(legacyRR, legacyReq)
+	if legacyRR.Code != http.StatusNotFound {
+		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusNotFound, legacyRR.Body.String())
+	}
+
+	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
+	authReq.Header.Set("Authorization", "Bearer test-management-key")
+	authRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(authRR, authReq)
+	if authRR.Code != http.StatusOK {
+		t.Fatalf("authenticated status = %d, want %d body=%s", authRR.Code, http.StatusOK, authRR.Body.String())
+	}
+
+	var payload []json.RawMessage
+	if errUnmarshal := json.Unmarshal(authRR.Body.Bytes(), &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v body=%s", errUnmarshal, authRR.Body.String())
+	}
+	if len(payload) != 2 {
+		t.Fatalf("response records = %d, want 2", len(payload))
+	}
+	for i, raw := range payload {
+		var record struct {
+			ID int `json:"id"`
+		}
+		if errUnmarshal := json.Unmarshal(raw, &record); errUnmarshal != nil {
+			t.Fatalf("unmarshal record %d: %v", i, errUnmarshal)
+		}
+		if record.ID != i+1 {
+			t.Fatalf("record %d id = %d, want %d", i, record.ID, i+1)
+		}
+	}
+
+	if remaining := redisqueue.PopOldest(1); len(remaining) != 0 {
+		t.Fatalf("remaining queue = %q, want empty", remaining)
+	}
+}
+
+func TestManagementPluginsRouteRegistered(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	enabled := true
+	server.cfg.Plugins.Configs = map[string]proxyconfig.PluginInstanceConfig{
+		"sample": {Enabled: &enabled, Priority: 4},
+	}
+	if errWrite := os.WriteFile(server.configFilePath, []byte("{}\n"), 0o600); errWrite != nil {
+		t.Fatalf("failed to write config file: %v", errWrite)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/plugins", nil)
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var payload struct {
+		PluginsEnabled bool  `json:"plugins_enabled"`
+		Plugins        []any `json:"plugins"`
+	}
+	if errUnmarshal := json.Unmarshal(rr.Body.Bytes(), &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v body=%s", errUnmarshal, rr.Body.String())
+	}
+	if payload.Plugins == nil {
+		t.Fatalf("plugins field = nil, want array; body=%s", rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/plugins/sample/config", nil)
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	rr = httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("config status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var configPayload struct {
+		Enabled  bool `json:"enabled"`
+		Priority int  `json:"priority"`
+	}
+	if errUnmarshal := json.Unmarshal(rr.Body.Bytes(), &configPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal config response: %v body=%s", errUnmarshal, rr.Body.String())
+	}
+	if !configPayload.Enabled || configPayload.Priority != 4 {
+		t.Fatalf("plugin config = %#v, want enabled true priority 4", configPayload)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/v0/management/plugins/sample", nil)
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	rr = httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+}
+
+func TestVideosRoutesKeepXAINativeAndExposeOpenAIPrefix(t *testing.T) {
+	server := newTestServer(t)
+
+	nativeReq := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"sora-2","prompt":"make a video"}`))
+	nativeReq.Header.Set("Authorization", "Bearer test-key")
+	nativeReq.Header.Set("Content-Type", "application/json")
+	nativeRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(nativeRR, nativeReq)
+	if nativeRR.Code != http.StatusBadRequest {
+		t.Fatalf("native status = %d, want %d body=%s", nativeRR.Code, http.StatusBadRequest, nativeRR.Body.String())
+	}
+	if !strings.Contains(nativeRR.Body.String(), "/v1/videos/generations") {
+		t.Fatalf("expected /v1/videos to keep xAI native validation, body=%s", nativeRR.Body.String())
+	}
+
+	openAIReq := httptest.NewRequest(http.MethodPost, "/openai/v1/videos", strings.NewReader(`{"model":`))
+	openAIReq.Header.Set("Authorization", "Bearer test-key")
+	openAIReq.Header.Set("Content-Type", "application/json")
+	openAIRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(openAIRR, openAIReq)
+	if openAIRR.Code != http.StatusBadRequest {
+		t.Fatalf("openai create status = %d, want %d body=%s", openAIRR.Code, http.StatusBadRequest, openAIRR.Body.String())
+	}
+	if !strings.Contains(openAIRR.Body.String(), "body must be valid JSON") {
+		t.Fatalf("expected /openai/v1/videos create handler, body=%s", openAIRR.Body.String())
+	}
+
+	contentReq := httptest.NewRequest(http.MethodGet, "/openai/v1/videos/video_123/content?variant=thumbnail", nil)
+	contentReq.Header.Set("Authorization", "Bearer test-key")
+	contentRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(contentRR, contentReq)
+	if contentRR.Code != http.StatusBadRequest {
+		t.Fatalf("content status = %d, want %d body=%s", contentRR.Code, http.StatusBadRequest, contentRR.Body.String())
+	}
+	if !strings.Contains(contentRR.Body.String(), "variant") {
+		t.Fatalf("expected /openai/v1/videos content handler, body=%s", contentRR.Body.String())
+	}
+}
+
+func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	server.cfg.Home.Enabled = true
+
+	t.Run("management endpoints return 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+		req.Header.Set("Authorization", "Bearer test-management-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
+		}
+	})
+
+	t.Run("management control panel returns 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
+		}
+	})
+}
+
+func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	staticDir := t.TempDir()
+	t.Setenv("MANAGEMENT_STATIC_PATH", staticDir)
+	if err := os.WriteFile(filepath.Join(staticDir, "management.html"), []byte("<html>management app</html>"), 0o600); err != nil {
+		t.Fatalf("failed to write management asset: %v", err)
+	}
+
+	server := newTestServerWithOptions(t, WithExampleAPIKeySafeMode())
+	cfg := *server.cfg
+	cfg.APIKeys = []string{"your-api-key-1"}
+	server.UpdateClients(&cfg)
+
+	t.Run("root warning page includes management link", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		body := rr.Body.String()
+		for _, want := range []string{"Example API key detected", "Open Management", `href="/management.html?safe-mode=configure"`} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("warning page missing %q: %s", want, body)
+			}
+		}
+	})
+
+	t.Run("management html defaults to warning page", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "Example API key detected") {
+			t.Fatalf("management.html did not show warning page: %s", rr.Body.String())
+		}
+	})
+
+	t.Run("management html head stops at warning page", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodHead, "/management.html", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("HEAD body length = %d, want 0", rr.Body.Len())
+		}
+		if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control = %q, want no-store", got)
+		}
+	})
+
+	t.Run("management button query opens control panel", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management.html?safe-mode=configure", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "management app") {
+			t.Fatalf("management panel body missing: %s", rr.Body.String())
+		}
+	})
+
+	t.Run("proxy endpoints are blocked", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+		}
+		if got := rr.Header().Get("X-CPA-SAFE-MODE"); got != "example-api-key" {
+			t.Fatalf("X-CPA-SAFE-MODE = %q, want example-api-key", got)
+		}
+		if !strings.Contains(rr.Body.String(), "unsafe_example_api_key") {
+			t.Fatalf("body missing safe-mode error: %s", rr.Body.String())
+		}
+		if strings.Contains(rr.Body.String(), "management_url") {
+			t.Fatalf("body should not include management_url field: %s", rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "/management.html?safe-mode=configure") {
+			t.Fatalf("body missing management link in message: %s", rr.Body.String())
+		}
+	})
+
+	t.Run("management endpoints still work", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+		req.Header.Set("Authorization", "Bearer test-management-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+	})
+
+	t.Run("safe mode clears after key update", func(t *testing.T) {
+		nextCfg := cfg
+		nextCfg.APIKeys = []string{"real-key"}
+		server.UpdateClients(&nextCfg)
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer real-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code == http.StatusForbidden && strings.Contains(rr.Body.String(), "unsafe_example_api_key") {
+			t.Fatalf("proxy endpoint still blocked after key update: %s", rr.Body.String())
+		}
+	})
+}
+
+func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-anthropic-version-dispatch"
+	modelRegistry.RegisterClient(clientID, "claude", []*registry.ModelInfo{
 		{
 			ID:                  "claude-sonnet-4-6",
 			Object:              "model",
@@ -755,5 +1132,16 @@ func TestHomeModelsErrorMessage(t *testing.T) {
 	}
 	if msg := homeModelsErrorMessage([]byte(`{"openai":[]}`)); msg != "home models request failed" {
 		t.Fatalf("default message = %q, want fallback", msg)
+	}
+}
+
+func TestInteractionsRouteRegistered(t *testing.T) {
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/interactions", strings.NewReader(`{"model":"gemini-3.5-flash","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code == http.StatusNotFound {
+		t.Fatalf("status = %d, want route registered; body=%s", rr.Code, rr.Body.String())
 	}
 }

@@ -6,6 +6,7 @@ import (
 	_ "github.com/NGLSL/CLIProxyAPI/v7/internal/thinking/provider/codex"
 	_ "github.com/NGLSL/CLIProxyAPI/v7/internal/thinking/provider/gemini"
 	_ "github.com/NGLSL/CLIProxyAPI/v7/internal/thinking/provider/geminicli"
+	_ "github.com/NGLSL/CLIProxyAPI/v7/internal/thinking/provider/interactions"
 	_ "github.com/NGLSL/CLIProxyAPI/v7/internal/thinking/provider/kimi"
 	_ "github.com/NGLSL/CLIProxyAPI/v7/internal/thinking/provider/openai"
 	_ "github.com/NGLSL/CLIProxyAPI/v7/internal/thinking/provider/xai"
