@@ -12,8 +12,11 @@ import (
 )
 
 const (
-	oauthSessionTTL     = 10 * time.Minute
-	maxOAuthStateLength = 128
+	oauthSessionTTL          = 10 * time.Minute
+	// oauthCompletedSessionTTL 是已完成会话的短暂保留时间。
+	// 保留 completed 状态是为了让轮询端区分「已完成」和「未知/过期」，避免把完成误判成 ok 继续等。
+	oauthCompletedSessionTTL = time.Minute
+	maxOAuthStateLength      = 128
 )
 
 const (
@@ -33,23 +36,32 @@ type oauthSession struct {
 	Status    string
 	Source    string
 	Metadata  map[string]any
+	// Completed 标记会话是否已经完成（成功/失败收尾后）。
+	// 完成后不会立刻删除，而是保留 completedTTL，便于状态查询拒绝重复回调。
+	Completed bool
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
 
 type oauthSessionStore struct {
-	mu       sync.RWMutex
-	ttl      time.Duration
-	sessions map[string]oauthSession
+	mu           sync.RWMutex
+	ttl          time.Duration
+	completedTTL time.Duration
+	sessions     map[string]oauthSession
 }
 
 func newOAuthSessionStore(ttl time.Duration) *oauthSessionStore {
 	if ttl <= 0 {
 		ttl = oauthSessionTTL
 	}
+	completedTTL := oauthCompletedSessionTTL
+	if ttl < completedTTL {
+		completedTTL = ttl
+	}
 	return &oauthSessionStore{
-		ttl:      ttl,
-		sessions: make(map[string]oauthSession),
+		ttl:          ttl,
+		completedTTL: completedTTL,
+		sessions:     make(map[string]oauthSession),
 	}
 }
 
@@ -127,7 +139,8 @@ func (s *oauthSessionStore) SetError(state, message string) {
 
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok {
+	// 已完成会话不再写入错误，避免覆盖 completed 终态。
+	if !ok || session.Completed {
 		return
 	}
 	session.Status = message
@@ -146,7 +159,16 @@ func (s *oauthSessionStore) Complete(state string) {
 	defer s.mu.Unlock()
 
 	s.purgeExpiredLocked(now)
-	delete(s.sessions, state)
+	session, ok := s.sessions[state]
+	if !ok || session.Completed {
+		return
+	}
+	// 幂等完成：清掉临时状态，标记 Completed，并缩短过期时间。
+	session.Status = ""
+	session.Metadata = nil
+	session.Completed = true
+	session.ExpiresAt = now.Add(s.completedTTL)
+	s.sessions[state] = session
 }
 
 func (s *oauthSessionStore) CompleteProvider(provider string, source string) int {
@@ -163,8 +185,12 @@ func (s *oauthSessionStore) CompleteProvider(provider string, source string) int
 	s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
-		if strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
-			delete(s.sessions, state)
+		if !session.Completed && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
+			session.Status = ""
+			session.Metadata = nil
+			session.Completed = true
+			session.ExpiresAt = now.Add(s.completedTTL)
+			s.sessions[state] = session
 			removed++
 		}
 	}
@@ -197,7 +223,7 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	if !ok {
 		return false
 	}
-	if session.Status != "" {
+	if session.Completed || session.Status != "" {
 		return false
 	}
 	if session.Source == oauthSessionSourcePlugin {
@@ -242,18 +268,19 @@ func CompletePluginOAuthSessionsByProvider(provider string) int {
 
 func GetOAuthSession(state string) (provider string, status string, ok bool) {
 	session, ok := oauthSessions.Get(state)
-	if !ok {
+	// 旧接口隐藏 completed 会话：调用方把它当成“不存在”，避免继续按 pending 处理。
+	if !ok || session.Completed {
 		return "", "", false
 	}
 	return session.Provider, session.Status, true
 }
 
-func GetOAuthSessionDetails(state string) (provider string, status string, isPlugin bool, metadata map[string]any, ok bool) {
+func GetOAuthSessionDetails(state string) (provider string, status string, isPlugin bool, metadata map[string]any, completed bool, ok bool) {
 	session, ok := oauthSessions.Get(state)
 	if !ok {
-		return "", "", false, nil, false
+		return "", "", false, nil, false, false
 	}
-	return session.Provider, session.Status, session.Source == oauthSessionSourcePlugin, cloneOAuthSessionMetadata(session.Metadata), true
+	return session.Provider, session.Status, session.Source == oauthSessionSourcePlugin, cloneOAuthSessionMetadata(session.Metadata), session.Completed, true
 }
 
 func IsOAuthSessionPending(state, provider string) bool {

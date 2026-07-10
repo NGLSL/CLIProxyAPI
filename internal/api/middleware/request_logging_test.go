@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 
@@ -46,6 +45,15 @@ func TestShouldSkipMethodForRequestLogging(t *testing.T) {
 			req: &http.Request{
 				Method: http.MethodGet,
 				URL:    &url.URL{Path: "/v1/responses"},
+				Header: http.Header{"Upgrade": []string{"websocket"}},
+			},
+			skip: false,
+		},
+		{
+			name: "codex responses websocket upgrade should not skip",
+			req: &http.Request{
+				Method: http.MethodGet,
+				URL:    &url.URL{Path: "/backend-api/codex/responses"},
 				Header: http.Header{"Upgrade": []string{"websocket"}},
 			},
 			skip: false,

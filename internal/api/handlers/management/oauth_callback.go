@@ -86,9 +86,14 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 		return
 	}
 
-	sessionProvider, sessionStatus, isPlugin, _, ok := GetOAuthSessionDetails(state)
+	sessionProvider, sessionStatus, isPlugin, _, completed, ok := GetOAuthSessionDetails(state)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"status": "error", "error": "unknown or expired state"})
+		return
+	}
+	if completed {
+		// 已完成会话拒绝重复 callback，防止二次写回调文件/重复完成。
+		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is already completed"})
 		return
 	}
 	provider := strings.TrimSpace(req.Provider)

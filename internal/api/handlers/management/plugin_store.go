@@ -56,28 +56,32 @@ type pluginStoreSourceErr struct {
 }
 
 type pluginStoreListEntry struct {
-	StoreID          string   `json:"store_id"`
-	SourceID         string   `json:"source_id"`
-	SourceName       string   `json:"source_name"`
-	SourceURL        string   `json:"source_url"`
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Description      string   `json:"description"`
-	Author           string   `json:"author"`
-	Version          string   `json:"version"`
-	Repository       string   `json:"repository"`
-	Logo             string   `json:"logo,omitempty"`
-	Homepage         string   `json:"homepage,omitempty"`
-	License          string   `json:"license,omitempty"`
-	Tags             []string `json:"tags,omitempty"`
-	Installed        bool     `json:"installed"`
-	InstalledVersion string   `json:"installed_version"`
-	Path             string   `json:"path"`
-	Configured       bool     `json:"configured"`
-	Registered       bool     `json:"registered"`
-	Enabled          bool     `json:"enabled"`
-	EffectiveEnabled bool     `json:"effective_enabled"`
-	UpdateAvailable  bool     `json:"update_available"`
+	StoreID             string   `json:"store_id"`
+	SourceID            string   `json:"source_id"`
+	SourceName          string   `json:"source_name"`
+	SourceURL           string   `json:"source_url"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	Description         string   `json:"description"`
+	Author              string   `json:"author"`
+	Version             string   `json:"version"`
+	Repository          string   `json:"repository"`
+	Logo                string   `json:"logo,omitempty"`
+	Homepage            string   `json:"homepage,omitempty"`
+	License             string   `json:"license,omitempty"`
+	Tags                []string `json:"tags,omitempty"`
+	Installed           bool     `json:"installed"`
+	InstalledVersion    string   `json:"installed_version"`
+	// InstalledSourceID 记录该插件当前安装来自哪个 store source。
+	// 多 source 场景下用于判断 update 是否允许，避免串源升级。
+	InstalledSourceID   string   `json:"installed_source_id,omitempty"`
+	InstallSourceStatus string   `json:"install_source_status,omitempty"`
+	Path                string   `json:"path"`
+	Configured          bool     `json:"configured"`
+	Registered          bool     `json:"registered"`
+	Enabled             bool     `json:"enabled"`
+	EffectiveEnabled    bool     `json:"effective_enabled"`
+	UpdateAvailable     bool     `json:"update_available"`
 }
 
 type pluginInstallResponse struct {
@@ -93,13 +97,17 @@ type pluginInstallResponse struct {
 }
 
 type pluginLocalStatus struct {
-	Installed        bool
-	InstalledVersion string
-	Path             string
-	Configured       bool
-	Registered       bool
-	Enabled          bool
-	EffectiveEnabled bool
+	Installed          bool
+	InstalledVersion   string
+	// StoreManaged 表示该插件配置里带有 store 来源元数据。
+	StoreManaged       bool
+	InstalledSourceID  string
+	InstalledSourceURL string
+	Path               string
+	Configured         bool
+	Registered         bool
+	Enabled            bool
+	EffectiveEnabled   bool
 }
 
 type sourcedPlugin struct {
@@ -131,11 +139,22 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 	}
 	client := h.newPluginStoreClient(proxyURL, "")
 	latestVersions := h.latestPluginVersions(c.Request.Context(), client, latestInput)
+	// 统计同一插件出现在多少个 source 中，用于安装来源未知时的 update 安全策略。
+	pluginSourceCounts := make(map[string]int, len(plugins))
+	for _, item := range plugins {
+		pluginSourceCounts[item.plugin.ID]++
+	}
 
 	entries := make([]pluginStoreListEntry, 0, len(plugins))
 	for index, item := range plugins {
 		plugin := item.plugin
 		status := statuses[plugin.ID]
+		installedSourceID, installSourceStatus, sourceAllowsUpdate := pluginStoreInstallSourceStatus(
+			status,
+			sources,
+			item.source.ID,
+			pluginSourceCounts[plugin.ID],
+		)
 		installedVersion := status.InstalledVersion
 		// Fall back to the registry version when the latest release is unknown.
 		storeVersion := plugin.Version
@@ -157,14 +176,16 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 			Homepage:         htmlsanitize.String(plugin.Homepage),
 			License:          htmlsanitize.String(plugin.License),
 			Tags:             htmlsanitize.Strings(plugin.Tags),
-			Installed:        status.Installed,
-			InstalledVersion: htmlsanitize.String(installedVersion),
-			Path:             htmlsanitize.String(status.Path),
-			Configured:       status.Configured,
-			Registered:       status.Registered,
-			Enabled:          status.Enabled,
-			EffectiveEnabled: status.EffectiveEnabled,
-			UpdateAvailable:  pluginstore.UpdateAvailable(installedVersion, storeVersion),
+			Installed:           status.Installed,
+			InstalledVersion:    htmlsanitize.String(installedVersion),
+			InstalledSourceID:   htmlsanitize.String(installedSourceID),
+			InstallSourceStatus: htmlsanitize.String(installSourceStatus),
+			Path:                htmlsanitize.String(status.Path),
+			Configured:          status.Configured,
+			Registered:          status.Registered,
+			Enabled:             status.Enabled,
+			EffectiveEnabled:    status.EffectiveEnabled,
+			UpdateAvailable:     sourceAllowsUpdate && pluginstore.UpdateAvailable(installedVersion, storeVersion),
 		})
 	}
 
@@ -187,7 +208,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	installCtx := c.Request.Context()
-	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, _, host := h.pluginStoreSnapshot()
+	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, configs, host := h.pluginStoreSnapshot()
 	sources, errSources := h.pluginStoreSources(sourceConfigs)
 	if errSources != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_store_source_invalid", "message": errSources.Error()})
@@ -195,6 +216,10 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	}
 	source, plugin, client, okPlugin := h.findPluginStoreInstallTarget(installCtx, proxyURL, sources, id, c.Query("source"), c)
 	if !okPlugin {
+		return
+	}
+	// 安装/更新前校验：若插件已绑定其它 store source，则拒绝串源覆盖。
+	if !validatePluginStoreInstallSource(c, configs, sources, id, source.ID) {
 		return
 	}
 
@@ -539,6 +564,7 @@ func pluginLocalStatuses(pluginsEnabled bool, pluginsDir string, configs map[str
 		status := statuses[id]
 		status.Configured = true
 		status.Enabled = pluginInstanceEnabled(item)
+		status.InstalledSourceID, status.InstalledSourceURL, status.StoreManaged = pluginStoreConfiguredSource(item)
 		statuses[id] = status
 	}
 	if host != nil {
@@ -566,3 +592,88 @@ func pluginLoaded(host *pluginhost.Host, id string) bool {
 	}
 	return host.PluginLoaded(id)
 }
+
+
+// pluginStoreConfiguredSource 从插件配置中尽量解析 store 来源。
+// 本地若无完整 store 元数据，则返回 managed=false，由上层按“未知来源”策略处理。
+func pluginStoreConfiguredSource(item config.PluginInstanceConfig) (sourceID string, sourceURL string, managed bool) {
+	// 当前本地配置结构未稳定暴露 store 元数据字段时，保守返回未托管。
+	// 这样不会误伤单 source 安装；多 source 时 update 会走 unknown 保护。
+	_ = item
+	return "", "", false
+}
+
+func pluginStoreResolveInstalledSource(status pluginLocalStatus, sources []pluginstore.Source) (string, bool) {
+	sourceID := strings.TrimSpace(status.InstalledSourceID)
+	sourceURL := strings.TrimSpace(status.InstalledSourceURL)
+	if sourceID != "" {
+		for _, source := range sources {
+			if strings.TrimSpace(source.ID) != sourceID {
+				continue
+			}
+			if sourceURL != "" && strings.TrimSpace(source.URL) != sourceURL {
+				return "", false
+			}
+			return sourceID, true
+		}
+		return sourceID, true
+	}
+	if sourceURL == "" {
+		return "", false
+	}
+	for _, source := range sources {
+		if strings.TrimSpace(source.URL) == sourceURL {
+			return strings.TrimSpace(source.ID), true
+		}
+	}
+	return "", false
+}
+
+func pluginStoreInstallSourceStatus(status pluginLocalStatus, sources []pluginstore.Source, entrySourceID string, sourceCount int) (installedSourceID string, sourceStatus string, allowUpdate bool) {
+	if !status.Installed && !status.Configured && !status.Registered {
+		return "", "", true
+	}
+	if sourceID, known := pluginStoreResolveInstalledSource(status, sources); known {
+		if sourceID == strings.TrimSpace(entrySourceID) {
+			return sourceID, "matched", true
+		}
+		return sourceID, "different", false
+	}
+	if status.StoreManaged || sourceCount > 1 {
+		return "", "unknown", false
+	}
+	return "", "unknown", true
+}
+
+func validatePluginStoreInstallSource(c *gin.Context, configs map[string]config.PluginInstanceConfig, sources []pluginstore.Source, pluginID string, requestedSourceID string) bool {
+	statuses, errStatus := pluginLocalStatuses(true, "plugins", configs, nil)
+	if errStatus != nil {
+		return true
+	}
+	status := statuses[pluginID]
+	if !status.Installed && !status.Configured && !status.Registered {
+		return true
+	}
+	installedSourceID, known := pluginStoreResolveInstalledSource(status, sources)
+	if !known {
+		if status.StoreManaged {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":   "plugin_install_source_unknown",
+				"message": "installed plugin source is unknown; refuse cross-source update",
+			})
+			return false
+		}
+		return true
+	}
+	if strings.TrimSpace(installedSourceID) == strings.TrimSpace(requestedSourceID) {
+		return true
+	}
+	c.JSON(http.StatusConflict, gin.H{
+		"error":               "plugin_install_source_mismatch",
+		"message":             "plugin is already installed from a different store source",
+		"installed_source_id": installedSourceID,
+		"requested_source_id": requestedSourceID,
+	})
+	return false
+}
+

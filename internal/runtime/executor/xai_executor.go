@@ -39,6 +39,14 @@ const (
 	xaiNamespaceToolType        = "namespace"
 	xaiToolSearchType           = "tool_search"
 	xaiWebSearchToolType        = "web_search"
+	// Codex Desktop injects codex_app.automation_update with a large oneOf+$ref
+	// schema. xAI free/build Responses path accepts the HTTP request but never
+	// emits SSE when that schema is present, so Desktop hangs on "thinking".
+	// 限制只处理 codex_app.automation_update，避免误伤其它工具 schema。
+	xaiCodexAppNamespaceName    = "codex_app"
+	xaiAutomationUpdateToolName = "automation_update"
+	// Permissive placeholder schema: keeps the tool callable without the hang.
+	xaiSafeFunctionParameters   = `{"type":"object","properties":{},"additionalProperties":true}`
 	xaiImagesGenerationsPath    = "/images/generations"
 	xaiImagesEditsPath          = "/images/edits"
 	xaiDefaultImageEndpointPath = xaiImagesGenerationsPath
@@ -146,7 +154,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	data, err := io.ReadAll(httpResp.Body)
@@ -219,7 +227,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
@@ -284,7 +292,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
@@ -330,7 +338,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return nil, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -685,9 +693,11 @@ func normalizeXAITools(body []byte) []byte {
 		toolType := tool.Get("type").String()
 		if toolType == xaiNamespaceToolType {
 			changed = true
+			// 命名空间工具需要把 namespace name 传给子工具，便于精确匹配 codex_app.automation_update
+			namespaceName := tool.Get("name").String()
 			if namespaceTools := tool.Get("tools"); namespaceTools.IsArray() {
 				for _, nestedTool := range namespaceTools.Array() {
-					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool)
+					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool, namespaceName)
 					if !ok {
 						return body
 					}
@@ -704,7 +714,7 @@ func normalizeXAITools(body []byte) []byte {
 			}
 			continue
 		}
-		raw, toolChanged, ok := normalizeXAITool(tool)
+		raw, toolChanged, ok := normalizeXAITool(tool, "")
 		if !ok {
 			return body
 		}
@@ -728,7 +738,7 @@ func normalizeXAITools(body []byte) []byte {
 	return updated
 }
 
-func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
+func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bool) {
 	toolType := tool.Get("type").String()
 	changed := false
 	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
@@ -763,7 +773,34 @@ func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
 		raw = updatedTool
 		changed = true
 	}
+	// 仅简化 codex_app.automation_update，避免误伤其它工具的 parameters 契约。
+	// 链路：normalizeXAITools -> normalizeXAITool(namespace) -> xaiFunctionParametersNeedSimplification。
+	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(tool, namespaceName) {
+		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(xaiSafeFunctionParameters))
+		if errSet != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		// 简化后的 schema 不再适合 strict=true，否则上游仍可能卡住。
+		if strict := tool.Get("strict"); strict.Exists() && strict.Bool() {
+			updatedTool, errSet = sjson.SetBytes(raw, "strict", false)
+			if errSet != nil {
+				return nil, false, false
+			}
+			raw = updatedTool
+		}
+		changed = true
+		log.Debugf("xai: simplified parameters for tool %s.%s to avoid upstream hang", namespaceName, tool.Get("name").String())
+	}
 	return raw, changed, true
+}
+
+// xaiFunctionParametersNeedSimplification 仅匹配 Codex Desktop 注入的
+// codex_app.automation_update，这是已知会让 xAI free/build 流挂起的工具。
+func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
+	return strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) &&
+		strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
+		strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), xaiAutomationUpdateToolName)
 }
 
 func normalizeXAIInputReasoningItems(body []byte) []byte {
@@ -955,4 +992,28 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 
 	patched, _ := sjson.SetRawBytes(eventData, "response.output", outputArray)
 	return patched
+}
+
+// xaiFreeUsageExhaustedCooldown 是 free 额度耗尽时的滚动窗口（cli-chat-proxy 文档：24h）。
+const xaiFreeUsageExhaustedCooldown = 24 * time.Hour
+
+// xaiStatusErr 包装上游错误体：当 free 额度耗尽（subscription:free-usage-exhausted）
+// 时附带 24h RetryAfter，方便账号轮换/冷却；普通 429 不强制 RetryAfter，仍走 conductor 退避。
+func xaiStatusErr(code int, body []byte) statusErr {
+	err := statusErr{code: code, msg: string(body)}
+	if code != http.StatusTooManyRequests || len(body) == 0 {
+		return err
+	}
+	codeStr := strings.ToLower(gjson.GetBytes(body, "code").String())
+	msg := strings.ToLower(gjson.GetBytes(body, "error").String())
+	if msg == "" {
+		msg = strings.ToLower(string(body))
+	}
+	if strings.Contains(codeStr, "free-usage-exhausted") ||
+		strings.Contains(msg, "free-usage-exhausted") ||
+		strings.Contains(msg, "included free usage") {
+		d := xaiFreeUsageExhaustedCooldown
+		err.retryAfter = &d
+	}
+	return err
 }
