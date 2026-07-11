@@ -587,6 +587,9 @@ func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, str
 	if strings.TrimSpace(token) != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
+	// Grok CLI 代理网关要求携带令牌认证标识和客户端版本头，否则请求会被拒绝。
+	r.Header.Set(xaiauth.XAITokenAuthHeaderKey, xaiauth.XAITokenAuthHeaderValue)
+	r.Header.Set(xaiauth.GrokClientVersionHeaderKey, xaiauth.GrokClientVersionHeaderValue)
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
 	} else {

@@ -1202,6 +1202,9 @@ func applyXAIWebsocketHeaders(headers http.Header, auth *cliproxyauth.Auth, toke
 	if strings.TrimSpace(token) != "" {
 		headers.Set("Authorization", "Bearer "+token)
 	}
+	// Grok CLI 代理网关要求携带令牌认证标识和客户端版本头，否则请求会被拒绝。
+	headers.Set(xaiauth.XAITokenAuthHeaderKey, xaiauth.XAITokenAuthHeaderValue)
+	headers.Set(xaiauth.GrokClientVersionHeaderKey, xaiauth.GrokClientVersionHeaderValue)
 	if sessionID != "" {
 		headers.Set("x-grok-conv-id", sessionID)
 	}
