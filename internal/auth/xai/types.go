@@ -4,14 +4,17 @@ package xai
 import "time"
 
 const (
-	// DefaultAPIBaseURL is the default xAI Grok CLI chat proxy base URL.
-	// Grok CLI OAuth 授权后，实际的 Responses API 请求需要发往 cli-chat-proxy.grok.com 而非 api.x.ai。
-	DefaultAPIBaseURL = "https://cli-chat-proxy.grok.com/v1"
+	// DefaultAPIBaseURL is the official xAI API base URL used by API mode,
+	// websocket transport, and image/video endpoints.
+	DefaultAPIBaseURL = "https://api.x.ai/v1"
+	// CLIChatProxyBaseURL is used by Grok CLI OAuth chat requests unless the
+	// auth file explicitly enables official API mode through using_api.
+	CLIChatProxyBaseURL = "https://cli-chat-proxy.grok.com/v1"
 	// XAITokenAuthHeader 是 Grok CLI 代理网关要求的令牌认证标识头，固定值 xai-grok-cli。
-	XAITokenAuthHeaderKey = "X-XAI-Token-Auth"
+	XAITokenAuthHeaderKey   = "X-XAI-Token-Auth"
 	XAITokenAuthHeaderValue = "xai-grok-cli"
 	// GrokClientVersionHeader 用于声明 Grok CLI 客户端版本，上游网关依赖此值做协议兼容。
-	GrokClientVersionHeaderKey = "x-grok-client-version"
+	GrokClientVersionHeaderKey   = "x-grok-client-version"
 	GrokClientVersionHeaderValue = "0.2.93"
 	// Issuer is xAI's OAuth issuer.
 	Issuer = "https://auth.x.ai"

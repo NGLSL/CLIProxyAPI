@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	xaiauth "github.com/NGLSL/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -31,17 +30,18 @@ func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (prepared *xaiPreparedRequest, data []byte, headers http.Header, err error) {
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, _ := xaiCreds(auth)
+	baseURL := xaiChatBaseURL(auth)
 
 	prepared, err = e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "stream")
+	// The compact endpoint does not receive tool definitions. Remove tool_choice
+	// with them because xAI rejects any tool selection policy when tools is absent.
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "tools")
+	prepared.body, _ = sjson.DeleteBytes(prepared.body, "tool_choice")
 	prepared.body = xaiRemoveInputItemsByType(prepared.body, "compaction_trigger")
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
@@ -53,7 +53,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID)
+	applyXAIChatHeaders(httpReq, auth, token, false, prepared.sessionID)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -85,6 +85,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)
+	clearXAIReasoningReplayAfterCompaction(ctx, prepared.replayScope)
 	return prepared, data, httpResp.Header.Clone(), nil
 }
 
@@ -328,6 +329,28 @@ func xaiNormalizeReasoningSummaryData(eventData []byte) []byte {
 	}
 
 	return normalized
+}
+
+func xaiNormalizeReasoningSummaryEventLine(line []byte, eventName string) []byte {
+	if eventName == "" && bytes.HasPrefix(line, xaiEventTag) {
+		eventName = strings.TrimSpace(string(line[len(xaiEventTag):]))
+	}
+	eventName = xaiNormalizeReasoningSummaryEventName(eventName)
+	if eventName == "" {
+		return bytes.Clone(line)
+	}
+	return []byte("event: " + eventName)
+}
+
+func xaiNormalizeReasoningSummaryEventName(eventName string) string {
+	switch eventName {
+	case "response.reasoning_text.delta":
+		return "response.reasoning_summary_text.delta"
+	case "response.reasoning_text.done":
+		return "response.reasoning_summary_part.done"
+	default:
+		return eventName
+	}
 }
 
 func xaiNormalizeReasoningSummaryDataEvents(eventData []byte) [][]byte {

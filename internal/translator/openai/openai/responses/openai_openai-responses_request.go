@@ -67,7 +67,13 @@ func buildResponsesToolCall(item gjson.Result) []byte {
 	if name := item.Get("name"); name.Exists() {
 		toolCall, _ = sjson.SetBytes(toolCall, "function.name", name.String())
 	}
-	if arguments := item.Get("arguments"); arguments.Exists() {
+	if responsesInputItemType(item) == "custom_tool_call" {
+		// Chat Completions has no freeform custom-tool item. Preserve the raw
+		// input inside the same {"input": string} function schema used when
+		// custom tool declarations are converted below.
+		wrappedArgs, _ := sjson.SetBytes([]byte(`{"input":""}`), "input", item.Get("input").String())
+		toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", string(wrappedArgs))
+	} else if arguments := item.Get("arguments"); arguments.Exists() {
 		toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
 	}
 	return toolCall
@@ -79,7 +85,7 @@ func buildResponsesToolMessage(item gjson.Result) []byte {
 		toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
 	}
 	if output := item.Get("output"); output.Exists() {
-		toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
+		toolMessage, _ = sjson.SetBytes(toolMessage, "content", responsesToolOutputText(output))
 	}
 	return toolMessage
 }
@@ -95,7 +101,7 @@ func collectResponsesToolOutputs(items []gjson.Result, start int) ([]gjson.Resul
 		item := items[i]
 		itemType := responsesInputItemType(item)
 		switch itemType {
-		case "function_call_output":
+		case "function_call_output", "custom_tool_call_output":
 			outputs = append(outputs, item)
 			i++
 		case "message":
@@ -326,9 +332,13 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				out = flushPendingResponsesAssistantMessage(out, &pendingAssistantMessage, &pendingReasoningContent)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
 
-			case "function_call":
+			case "function_call", "custom_tool_call":
 				var calls []gjson.Result
-				for i < len(items) && responsesInputItemType(items[i]) == "function_call" {
+				for i < len(items) {
+					callType := responsesInputItemType(items[i])
+					if callType != "function_call" && callType != "custom_tool_call" {
+						break
+					}
 					calls = append(calls, items[i])
 					i++
 				}
@@ -350,7 +360,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 				out = flushPendingResponsesAssistantMessage(out, &pendingAssistantMessage, &pendingReasoningContent)
 
-			case "function_call_output":
+			case "function_call_output", "custom_tool_call_output":
 				// Drop orphaned tool outputs here because Chat Completions requires every
 				// tool message to immediately follow an assistant tool_calls message.
 			}
@@ -363,20 +373,32 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 	}
 
-	// Convert tools from responses format to chat completions format
-	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var chatCompletionsTools []interface{}
-
+	// Codex Responses Lite can deliver declarations inside additional_tools
+	// input items while leaving the top-level tools field null. Merge both
+	// locations so OpenAI-compatible upstreams receive the complete tool set.
+	var chatCompletionsTools []interface{}
+	appendChatTools := func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
+		}
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
 				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
 			}
 			return true
 		})
-
-		if len(chatCompletionsTools) > 0 {
-			out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)
-		}
+	}
+	appendChatTools(root.Get("tools"))
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if responsesInputItemType(item) == "additional_tools" {
+				appendChatTools(item.Get("tools"))
+			}
+			return true
+		})
+	}
+	if len(chatCompletionsTools) > 0 {
+		out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)
 	}
 
 	if reasoningEffort := root.Get("reasoning.effort"); reasoningEffort.Exists() {

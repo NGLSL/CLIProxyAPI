@@ -7,6 +7,7 @@ import (
 )
 
 const requestInterruptedByUserText = "request interrupted by user"
+const requestScopedErrorCode = "request_scoped"
 
 // IsRequestInterruptedError reports whether err represents a user/request cancellation rather than provider health.
 func IsRequestInterruptedError(err error) bool {
@@ -52,4 +53,10 @@ func (e *Error) StatusCode() int {
 		return 0
 	}
 	return e.HTTPStatus
+}
+
+// IsRequestScoped reports whether the failure is tied to the current request
+// rather than the selected credential.
+func (e *Error) IsRequestScoped() bool {
+	return e != nil && e.Code == requestScopedErrorCode
 }

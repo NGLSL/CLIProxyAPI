@@ -8,6 +8,8 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -26,6 +28,7 @@ type ConvertCliToOpenAIParams struct {
 	FunctionCallIndex         int
 	HasReceivedArgumentsDelta bool
 	HasToolCallAnnounced      bool
+	LastImageHashByItemID     map[string][32]byte
 }
 
 // ConvertCodexResponseToOpenAI translates a single chunk of a streaming response from the
@@ -51,6 +54,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			FunctionCallIndex:         -1,
 			HasReceivedArgumentsDelta: false,
 			HasToolCallAnnounced:      false,
+			LastImageHashByItemID:     make(map[string][32]byte),
 		}
 	}
 
@@ -70,6 +74,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		(*param).(*ConvertCliToOpenAIParams).ResponseID = rootResult.Get("response.id").String()
 		(*param).(*ConvertCliToOpenAIParams).CreatedAt = rootResult.Get("response.created_at").Int()
 		(*param).(*ConvertCliToOpenAIParams).Model = rootResult.Get("response.model").String()
+		if (*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID == nil {
+			(*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID = make(map[string][32]byte)
+		}
 		return [][]byte{}
 	}
 
@@ -124,13 +131,56 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.SetBytes(template, "choices.0.delta.content", deltaResult.String())
 		}
-	} else if dataType == "response.completed" {
+	} else if dataType == "response.image_generation_call.partial_image" {
+		itemID := rootResult.Get("item_id").String()
+		b64 := rootResult.Get("partial_image_b64").String()
+		if b64 == "" {
+			return [][]byte{}
+		}
+		if itemID != "" {
+			p := (*param).(*ConvertCliToOpenAIParams)
+			if p.LastImageHashByItemID == nil {
+				p.LastImageHashByItemID = make(map[string][32]byte)
+			}
+			hash := sha256.Sum256([]byte(b64))
+			if last, ok := p.LastImageHashByItemID[itemID]; ok && last == hash {
+				return [][]byte{}
+			}
+			p.LastImageHashByItemID[itemID] = hash
+		}
+
+		outputFormat := rootResult.Get("output_format").String()
+		mimeType := mimeTypeFromCodexOutputFormat(outputFormat)
+		imageURL := "data:" + mimeType + ";base64," + b64
+
+		imagesResult := gjson.GetBytes(template, "choices.0.delta.images")
+		if !imagesResult.Exists() || !imagesResult.IsArray() {
+			template, _ = sjson.SetRawBytes(template, "choices.0.delta.images", []byte(`[]`))
+		}
+		imageIndex := len(gjson.GetBytes(template, "choices.0.delta.images").Array())
+		imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+		imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
+		imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
+
+		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+		template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
+	} else if dataType == "response.completed" || dataType == "response.incomplete" {
 		finishReason := "stop"
-		if (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex != -1 {
+		nativeFinishReason := finishReason
+		if dataType == "response.incomplete" {
+			nativeFinishReason = rootResult.Get("response.incomplete_details.reason").String()
+			switch nativeFinishReason {
+			case "max_tokens", "max_output_tokens":
+				finishReason = "length"
+			case "content_filter":
+				finishReason = "content_filter"
+			}
+		} else if (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex != -1 {
 			finishReason = "tool_calls"
+			nativeFinishReason = finishReason
 		}
 		template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-		template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
+		template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", nativeFinishReason)
 	} else if dataType == "response.output_item.added" {
 		itemResult := rootResult.Get("item")
 		if !itemResult.Exists() || itemResult.Get("type").String() != "function_call" {
@@ -225,6 +275,27 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	return [][]byte{template}
 }
 
+func mimeTypeFromCodexOutputFormat(outputFormat string) string {
+	if outputFormat == "" {
+		return "image/png"
+	}
+	if strings.Contains(outputFormat, "/") {
+		return outputFormat
+	}
+	switch strings.ToLower(outputFormat) {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "webp":
+		return "image/webp"
+	case "gif":
+		return "image/gif"
+	default:
+		return "image/png"
+	}
+}
+
 // ConvertCodexResponseToOpenAINonStream converts a non-streaming Codex response to a non-streaming OpenAI response.
 // This function processes the complete Codex response and transforms it into a single OpenAI-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
@@ -240,8 +311,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	rootResult := gjson.ParseBytes(rawJSON)
-	// Verify this is a response.completed event
-	if rootResult.Get("type").String() != "response.completed" {
+	// Verify this is a terminal response event.
+	responseType := rootResult.Get("type").String()
+	if responseType != "response.completed" && responseType != "response.incomplete" {
 		return []byte{}
 	}
 
@@ -375,16 +447,33 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		}
 	}
 
-	// Extract and set the finish reason based on status
+	// Extract and set the finish reason based on status.
 	if statusResult := responseResult.Get("status"); statusResult.Exists() {
 		status := statusResult.String()
-		if status == "completed" {
-			finishReason := "stop"
+		finishReason := ""
+		nativeFinishReason := ""
+		switch status {
+		case "completed":
+			finishReason = "stop"
+			nativeFinishReason = finishReason
 			if len(toolCalls) > 0 {
 				finishReason = "tool_calls"
+				nativeFinishReason = finishReason
 			}
+		case "incomplete":
+			nativeFinishReason = responseResult.Get("incomplete_details.reason").String()
+			switch nativeFinishReason {
+			case "max_tokens", "max_output_tokens":
+				finishReason = "length"
+			case "content_filter":
+				finishReason = "content_filter"
+			default:
+				finishReason = "stop"
+			}
+		}
+		if finishReason != "" {
 			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
+			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", nativeFinishReason)
 		}
 	}
 
