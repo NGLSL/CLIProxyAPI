@@ -59,7 +59,7 @@ const (
 )
 
 const (
-	defaultStreamingKeepAliveSeconds = 0
+	defaultStreamingKeepAliveSeconds = 15
 	defaultStreamingBootstrapRetries = 0
 	// Stream interceptor history is intentionally bounded and not configurable in the first SDK surface.
 	maxStreamInterceptorHistoryChunks = 64
@@ -217,11 +217,19 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 }
 
 // StreamingKeepAliveInterval returns the SSE keep-alive interval for this server.
-// Returning 0 disables keep-alives (default when unset).
+// 默认 15s：长思考空窗时持续发送 SSE 注释心跳，降低反代/客户端 idle 超时导致的“自己断流”。
+// 配置优先级：
+//   - keepalive-seconds > 0：使用配置值
+//   - keepalive-seconds < 0：显式关闭 keep-alive
+//   - 未配置或 0：使用默认 15s（避免 yaml 零值把默认盖掉）
 func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	seconds := defaultStreamingKeepAliveSeconds
 	if cfg != nil {
-		seconds = cfg.Streaming.KeepAliveSeconds
+		if cfg.Streaming.KeepAliveSeconds > 0 {
+			seconds = cfg.Streaming.KeepAliveSeconds
+		} else if cfg.Streaming.KeepAliveSeconds < 0 {
+			return 0
+		}
 	}
 	if seconds <= 0 {
 		return 0

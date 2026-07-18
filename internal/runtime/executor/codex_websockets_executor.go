@@ -73,7 +73,10 @@ type codexWebsocketSession struct {
 
 	writeMu sync.Mutex
 
+	// activeMu 保护 activeConn/activeCh：同一会话可能被多个下游请求复用，
+	// 必须把“当前活跃读通道”绑定到具体 websocket.Conn，避免旧连接/重连后的消息串流。
 	activeMu     sync.Mutex
+	activeConn   *websocket.Conn
 	activeCh     chan codexWebsocketRead
 	activeDone   <-chan struct{}
 	activeCancel context.CancelFunc
@@ -98,7 +101,9 @@ type codexWebsocketRead struct {
 	err     error
 }
 
-func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
+// setActive 将读事件通道绑定到指定上游连接。
+// 只有 activeConn == conn 时，readUpstreamLoop 才会向该通道投递消息，防止并发请求互相抢事件。
+func (s *codexWebsocketSession) setActive(conn *websocket.Conn, ch chan codexWebsocketRead) {
 	if s == nil {
 		return
 	}
@@ -108,8 +113,9 @@ func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
 		s.activeCancel = nil
 		s.activeDone = nil
 	}
+	s.activeConn = conn
 	s.activeCh = ch
-	if ch != nil {
+	if conn != nil && ch != nil {
 		activeCtx, activeCancel := context.WithCancel(context.Background())
 		s.activeDone = activeCtx.Done()
 		s.activeCancel = activeCancel
@@ -117,20 +123,47 @@ func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
 	s.activeMu.Unlock()
 }
 
-func (s *codexWebsocketSession) clearActive(ch chan codexWebsocketRead) {
-	if s == nil {
-		return
+// activate 为指定连接创建新的活跃读通道（带缓冲），并设为当前 active。
+func (s *codexWebsocketSession) activate(conn *websocket.Conn) chan codexWebsocketRead {
+	if s == nil || conn == nil {
+		return nil
+	}
+	ch := make(chan codexWebsocketRead, 4096)
+	s.setActive(conn, ch)
+	return ch
+}
+
+// activeForConn 仅在通道仍绑定该连接时返回，用于读循环里校验“消息是否属于当前请求”。
+func (s *codexWebsocketSession) activeForConn(conn *websocket.Conn) (chan codexWebsocketRead, <-chan struct{}) {
+	if s == nil || conn == nil {
+		return nil, nil
 	}
 	s.activeMu.Lock()
-	if s.activeCh == ch {
-		s.activeCh = nil
-		if s.activeCancel != nil {
-			s.activeCancel()
-		}
-		s.activeCancel = nil
-		s.activeDone = nil
+	defer s.activeMu.Unlock()
+	if s.activeConn != conn {
+		return nil, nil
 	}
-	s.activeMu.Unlock()
+	return s.activeCh, s.activeDone
+}
+
+// clearActive 只有 conn+ch 同时匹配当前 active 才清理，避免后启动请求的 defer 清掉前一个请求的通道。
+func (s *codexWebsocketSession) clearActive(conn *websocket.Conn, ch chan codexWebsocketRead) bool {
+	if s == nil {
+		return false
+	}
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if s.activeConn != conn || s.activeCh != ch {
+		return false
+	}
+	s.activeConn = nil
+	s.activeCh = nil
+	if s.activeCancel != nil {
+		s.activeCancel()
+	}
+	s.activeCancel = nil
+	s.activeDone = nil
+	return true
 }
 
 func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte) error {
@@ -155,6 +188,44 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 		// Reply pongs from the same write lock to avoid concurrent writes.
 		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
 	})
+}
+
+// websocketSessionTargetChanged 判断会话是否已绑定到不同 auth/endpoint。
+// 用于在重拨前识别“目标变了”，避免继续往旧上游写请求。
+func websocketSessionTargetChanged(sess *codexWebsocketSession, authID string, wsURL string) bool {
+	if sess == nil {
+		return false
+	}
+
+	sess.connMu.Lock()
+	defer sess.connMu.Unlock()
+	if strings.TrimSpace(sess.authID) == "" && strings.TrimSpace(sess.wsURL) == "" {
+		return false
+	}
+	return strings.TrimSpace(sess.authID) != strings.TrimSpace(authID) || strings.TrimSpace(sess.wsURL) != strings.TrimSpace(wsURL)
+}
+
+// detachMismatchedWebsocketSessionConn 在 authID/wsURL 变化时摘掉旧连接引用，
+// 返回旧连接供调用方关闭。链路：请求切换凭据/端点 -> detach 旧 conn -> dial 新 conn -> activate 新读通道。
+func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string) (*websocket.Conn, string, string) {
+	if sess == nil {
+		return nil, "", ""
+	}
+
+	sess.connMu.Lock()
+	defer sess.connMu.Unlock()
+	conn := sess.conn
+	if conn == nil || (strings.TrimSpace(sess.authID) == strings.TrimSpace(authID) && strings.TrimSpace(sess.wsURL) == strings.TrimSpace(wsURL)) {
+		return nil, "", ""
+	}
+
+	previousAuthID := sess.authID
+	previousWSURL := sess.wsURL
+	sess.conn = nil
+	if sess.readerConn == conn {
+		sess.readerConn = nil
+	}
+	return conn, previousAuthID, previousWSURL
 }
 
 func (s *codexWebsocketSession) notifyUpstreamDisconnect(err error) {
@@ -217,6 +288,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
+	body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -224,7 +296,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, err
 	}
 
-	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
+	body, wsHeaders, errPromptCache := applyCodexPromptCacheHeadersWithContext(ctx, from, req, body, opts.Headers)
+	if errPromptCache != nil {
+		return resp, errPromptCache
+	}
 	clientBody := body
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
@@ -294,9 +369,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = make(chan codexWebsocketRead, 4096)
-		sess.setActive(readCh)
-		defer sess.clearActive(readCh)
+		readCh = sess.activate(conn)
+		defer func() {
+			sess.clearActive(conn, readCh)
+		}()
 	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
@@ -308,6 +384,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// execution session.
 			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
+				// 重拨成功后必须把 active 读通道切到新 conn，否则读循环消息会落到旧通道导致“自己断流”。
+				conn = connRetry
+				readCh = sess.activate(conn)
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -322,8 +401,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				})
 				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
 				reporter.StartResponseTTFT()
-				if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry == nil {
-					conn = connRetry
+				if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry == nil {
 					wsReqBody = wsReqBodyRetry
 				} else {
 					e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
@@ -434,6 +512,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
+	body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -441,7 +520,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, err
 	}
 
-	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
+	body, wsHeaders, errPromptCache := applyCodexPromptCacheHeadersWithContext(ctx, from, req, body, opts.Headers)
+	if errPromptCache != nil {
+		return nil, errPromptCache
+	}
 	clientBody := body
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, body)
@@ -508,8 +590,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = make(chan codexWebsocketRead, 4096)
-		sess.setActive(readCh)
+		readCh = sess.activate(conn)
 	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
@@ -522,10 +603,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if errDialRetry != nil || connRetry == nil {
 				closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
-				sess.clearActive(readCh)
+				sess.clearActive(conn, readCh)
 				sess.reqMu.Unlock()
 				return nil, errDialRetry
 			}
+			// 流式路径同样要在重拨后切换 activeConn，保证后续 chunk 来自新连接。
+			conn = connRetry
+			readCh = sess.activate(conn)
 			wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,
@@ -540,14 +624,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			})
 			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
 			reporter.StartResponseTTFT()
-			if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
+			if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry != nil {
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
-				e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
-				sess.clearActive(readCh)
+				e.invalidateUpstreamConn(sess, conn, "send_error", errSendRetry)
+				sess.clearActive(conn, readCh)
 				sess.reqMu.Unlock()
 				return nil, errSendRetry
 			}
-			conn = connRetry
 			wsReqBody = wsReqBodyRetry
 		} else {
 			logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "send_error", errSend)
@@ -566,7 +649,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		defer close(out)
 		defer func() {
 			if sess != nil {
-				sess.clearActive(readCh)
+				sess.clearActive(conn, readCh)
 				sess.reqMu.Unlock()
 				return
 			}
@@ -720,6 +803,16 @@ func mapCodexWebsocketReadError(err error) error {
 	return err
 }
 
+// normalizeCodexWebsocketParallelToolCalls 仅在 responses-lite 请求上强制关闭并行 tool call。
+// 非 lite 路径保持客户端原始值，避免误伤普通 Codex WS。
+func normalizeCodexWebsocketParallelToolCalls(body []byte, headers http.Header) []byte {
+	if !isCodexResponsesLiteRequest(body, headers) {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "parallel_tool_calls", false)
+	return body
+}
+
 func buildCodexWebsocketRequestBody(body []byte) []byte {
 	if len(body) == 0 {
 		return nil
@@ -728,6 +821,7 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	// Match codex-rs websocket v2 semantics: every request is `response.create`.
 	// Incremental follow-up turns continue on the same websocket using
 	// `previous_response_id` + incremental `input`, not `response.append`.
+	body = helps.SanitizeCodexInputItemIDs(body)
 	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
 	if errSet == nil && len(wsReqBody) > 0 {
 		return wsReqBody
@@ -853,20 +947,30 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header) {
-	body, headers, _ := applyCodexPromptCacheHeadersWithContext(context.Background(), from, req, rawJSON)
+func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte, requestHeaders ...http.Header) ([]byte, http.Header) {
+	body, headers, _ := applyCodexPromptCacheHeadersWithContext(context.Background(), from, req, rawJSON, requestHeaders...)
 	return body, headers
 }
 
-func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header, error) {
+// applyCodexPromptCacheHeadersWithContext 为 WS 上游请求写入 prompt_cache_key，并返回需要附带的 Session_id 头。
+// Claude Code 路径会读取 requestHeaders / gin 中的 agent 头，保证与 HTTP 路径同一套 agent 分桶。
+func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte, requestHeaderSets ...http.Header) ([]byte, http.Header, error) {
 	headers := http.Header{}
 	if len(rawJSON) == 0 {
 		return rawJSON, headers, nil
 	}
 
+	var requestHeaders http.Header
+	if len(requestHeaderSets) > 0 {
+		requestHeaders = requestHeaderSets[0]
+	}
 	var cache helps.CodexCache
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
-		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, req.Model, req.Payload, nil)
+		modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+		if modelName == "" {
+			modelName = thinking.ParseSuffix(req.Model).ModelName
+		}
+		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, requestHeaders)
 		if errCache != nil {
 			return nil, nil, errCache
 		}
@@ -1405,30 +1509,18 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 		return e.dialCodexWebsocket(ctx, auth, wsURL, headers)
 	}
 
+	// 先摘掉目标不匹配的旧连接，避免读循环继续往已失效 activeCh 塞消息造成“偶发断流”。
+	if staleConn, staleAuthID, staleWSURL := detachMismatchedWebsocketSessionConn(sess, authID, wsURL); staleConn != nil {
+		logCodexWebsocketDisconnected(sess.sessionID, staleAuthID, staleWSURL, "target_changed", nil)
+		if errClose := staleConn.Close(); errClose != nil {
+			log.Errorf("codex websockets executor: close stale websocket error: %v", errClose)
+		}
+	}
+
 	sess.connMu.Lock()
 	conn := sess.conn
 	readerConn := sess.readerConn
-	sessionAuthID := strings.TrimSpace(sess.authID)
-	sessionWSURL := strings.TrimSpace(sess.wsURL)
-	sessionID := sess.sessionID
-	if conn != nil && (sessionAuthID != strings.TrimSpace(authID) || sessionWSURL != strings.TrimSpace(wsURL)) {
-		oldConn := conn
-		oldAuthID := sess.authID
-		oldWSURL := sess.wsURL
-		sess.conn = nil
-		if sess.readerConn == oldConn {
-			sess.readerConn = nil
-		}
-		conn = nil
-		readerConn = nil
-		sess.connMu.Unlock()
-		logCodexWebsocketDisconnected(sessionID, oldAuthID, oldWSURL, "auth_or_endpoint_changed", nil)
-		if errClose := oldConn.Close(); errClose != nil {
-			log.Errorf("codex websockets executor: close websocket error: %v", errClose)
-		}
-	} else {
-		sess.connMu.Unlock()
-	}
+	sess.connMu.Unlock()
 	if conn != nil {
 		if readerConn != conn {
 			sess.connMu.Lock()
@@ -1474,18 +1566,16 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
-			sess.activeMu.Lock()
-			ch := sess.activeCh
-			done := sess.activeDone
-			sess.activeMu.Unlock()
+			ch, done := sess.activeForConn(conn)
 			if ch != nil {
 				select {
 				case ch <- codexWebsocketRead{conn: conn, err: errRead}:
 				case <-done:
 				default:
 				}
-				sess.clearActive(ch)
-				close(ch)
+				if sess.clearActive(conn, ch) {
+					close(ch)
+				}
 			}
 			e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			return
@@ -1494,18 +1584,16 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
 				errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
-				sess.activeMu.Lock()
-				ch := sess.activeCh
-				done := sess.activeDone
-				sess.activeMu.Unlock()
+				ch, done := sess.activeForConn(conn)
 				if ch != nil {
 					select {
 					case ch <- codexWebsocketRead{conn: conn, err: errBinary}:
 					case <-done:
 					default:
 					}
-					sess.clearActive(ch)
-					close(ch)
+					if sess.clearActive(conn, ch) {
+						close(ch)
+					}
 				}
 				e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 				return
@@ -1513,10 +1601,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			continue
 		}
 
-		sess.activeMu.Lock()
-		ch := sess.activeCh
-		done := sess.activeDone
-		sess.activeMu.Unlock()
+		ch, done := sess.activeForConn(conn)
 		if ch == nil {
 			continue
 		}

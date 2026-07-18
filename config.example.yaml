@@ -190,9 +190,10 @@ ws-auth: true
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
-# streaming:
-#   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
-#   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
+# keepalive 用于长思考/空窗时防止中间层 idle 超时把 SSE 掐断；默认 15 秒。
+streaming:
+  keepalive-seconds: 15   # Default: 15. >0 override, <0 disable, 0/omit keeps default 15.
+  bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
 
 # Signature cache validation for thinking blocks (Antigravity/Claude).
 # When true (default), cached signatures are preferred and validated.

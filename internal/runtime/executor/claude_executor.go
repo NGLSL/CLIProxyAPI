@@ -888,14 +888,15 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	return body
 }
 
-// normalizeClaudeSamplingForUpstream keeps Anthropic message requests valid.
+// normalizeClaudeSamplingForUpstream 保证发往 Anthropic 上游的采样参数合法。
+// temperature / top_p 同时存在时上游可能拒请求，这里统一剥离；thinking 开启时再去掉 top_k。
 func normalizeClaudeSamplingForUpstream(body []byte) []byte {
 	body, _ = sjson.DeleteBytes(body, "temperature")
+	body, _ = sjson.DeleteBytes(body, "top_p")
 
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	switch thinkingType {
 	case "enabled", "adaptive", "auto":
-		body, _ = sjson.DeleteBytes(body, "top_p")
 		body, _ = sjson.DeleteBytes(body, "top_k")
 	}
 	return body

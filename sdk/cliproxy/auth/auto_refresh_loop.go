@@ -5,9 +5,16 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
+)
+
+// 观测计数：调度空转防护触发次数。用于定位“空闲时 CPU 偶发打满”。
+var (
+	autoRefreshSpinGuardHits atomic.Uint64
+	autoRefreshMinWaitClamps atomic.Uint64
 )
 
 type authAutoRefreshLoop struct {
@@ -163,8 +170,17 @@ func (l *authAutoRefreshLoop) resetTimer(timer *time.Timer, timerCh *<-chan time
 	}
 
 	wait := next.Sub(now)
-	if wait < 0 {
-		wait = 0
+	// 调度精度对 token 刷新不需要亚百毫秒。若 wait<=0（堆顶已到期），
+	// 允许很快触发，但禁止 Reset(0) 热循环：某些 shouldRefresh/next 不一致
+	// 或并发改写会把堆顶反复钉在 now，从而把单核 CPU 打满。
+	const minRefreshTimerWait = 100 * time.Millisecond
+	if wait < minRefreshTimerWait {
+		original := wait
+		wait = minRefreshTimerWait
+		hits := autoRefreshMinWaitClamps.Add(1)
+		if hits == 1 || hits%200 == 0 {
+			log.Warnf("auto-refresh: clamped timer wait from %v to %v hits=%d", original, minRefreshTimerWait, hits)
+		}
 	}
 	if !timer.Stop() {
 		select {
@@ -242,6 +258,21 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	}
 
 	if !shouldRefresh {
+		// 关键防空转：nextRefreshCheckAt 可能返回 now，但 shouldRefresh 仍为 false
+		// （例如 lead/expiry 判定不一致）。若仍用 next=now 入堆，resetTimer 会 Reset(0)
+		// 立即再触发 handleDue，形成空转把 CPU 打满。
+		if !next.After(now) {
+			backoff := l.interval
+			if backoff <= 0 {
+				backoff = refreshCheckInterval
+			}
+			next = now.Add(backoff)
+			hits := autoRefreshSpinGuardHits.Add(1)
+			// 首次 + 每 50 次打一次，避免日志本身变成 CPU 源。
+			if hits == 1 || hits%50 == 0 {
+				log.Warnf("auto-refresh: advanced past-due non-refresh auth to avoid CPU spin hits=%d id=%s next=%s", hits, authID, next.Format(time.RFC3339))
+			}
+		}
 		l.upsert(authID, next)
 		return
 	}

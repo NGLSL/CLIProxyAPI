@@ -16,6 +16,10 @@ import (
 )
 
 const (
+	// CodexReasoningReplayTurnType 是内部回合边界标记类型。
+	// 多轮累加时，每一轮缓存项都以该 marker 开头，后续 get/insert 按 marker 切分回合。
+	CodexReasoningReplayTurnType = "cpa_codex_replay_turn"
+
 	// CodexReasoningReplayCacheTTL limits how long encrypted reasoning replay
 	// items stay in process memory.
 	CodexReasoningReplayCacheTTL = 1 * time.Hour
@@ -23,6 +27,13 @@ const (
 	// CodexReasoningReplayCacheMaxEntries bounds process memory for replay
 	// continuity. Oldest entries are evicted first.
 	CodexReasoningReplayCacheMaxEntries = 10240
+
+	// CodexReasoningReplayCacheMaxTurnsPerEntry 限制单个 session/agent 最多保留多少轮。
+	// 超出后从最早回合开始裁剪，防止多 agent 长时间会话无限膨胀。
+	CodexReasoningReplayCacheMaxTurnsPerEntry = 256
+
+	// CodexReasoningReplayCacheMaxBytesPerEntry 限制单个 session/agent 累计序列化体积。
+	CodexReasoningReplayCacheMaxBytesPerEntry = 16 << 20
 
 	// CodexReasoningReplayCacheEvictBatchSize leaves headroom after the cache
 	// reaches capacity so high write volume does not rescan the map every turn.
@@ -42,6 +53,7 @@ var (
 type codexReasoningReplayKVClient interface {
 	KVGet(ctx context.Context, key string) ([]byte, bool, error)
 	KVSet(ctx context.Context, key string, value []byte, opts homekv.KVSetOptions) (bool, error)
+	KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, value []byte, ttl time.Duration) (bool, error)
 	KVDel(ctx context.Context, keys ...string) (int64, error)
 	KVExpire(ctx context.Context, key string, ttl time.Duration) (bool, error)
 }
@@ -105,13 +117,138 @@ func CacheCodexReasoningReplayItemsBestEffort(ctx context.Context, modelName, se
 	return true
 }
 
-// GetCodexReasoningReplayItem retrieves a normalized reasoning replay item.
+// AppendCodexReasoningReplayItemsBestEffort 把“刚完成的一轮”追加到已有累计状态。
+// 与 Cache... 的覆盖写不同：Append 会保留历史回合，并在 Home 模式用 CAS 防并发丢轮。
+// 调用方应先在 items 前放 turn marker（type=CodexReasoningReplayTurnType）。
+func AppendCodexReasoningReplayItemsBestEffort(ctx context.Context, modelName, sessionKey string, items [][]byte) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := codexReasoningReplayCacheKey(modelName, sessionKey)
+	if key == "" {
+		return false
+	}
+	normalized, ok := normalizeCodexReasoningReplayItems(items)
+	if !ok {
+		return false
+	}
+	if client, homeMode, errClient := currentCodexReasoningReplayKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errClient)
+			return false
+		}
+		kvKey := codexReasoningReplayKVKey(modelName, sessionKey)
+		const maxCASAttempts = 32
+		for attempt := 0; attempt < maxCASAttempts; attempt++ {
+			if errContext := ctx.Err(); errContext != nil {
+				return false
+			}
+			existingRaw, found, errGet := client.KVGet(ctx, kvKey)
+			if errGet != nil {
+				log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errGet)
+				return false
+			}
+			var existing [][]byte
+			if found {
+				if errUnmarshal := json.Unmarshal(existingRaw, &existing); errUnmarshal != nil {
+					log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errUnmarshal)
+					return false
+				}
+			}
+			combined := appendCodexReasoningReplayTurn(existing, normalized)
+			raw, errMarshal := json.Marshal(combined)
+			if errMarshal != nil {
+				log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errMarshal)
+				return false
+			}
+			written, errCAS := client.KVCompareAndSwap(ctx, kvKey, existingRaw, found, raw, CodexReasoningReplayCacheTTL)
+			if errCAS != nil {
+				log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errCAS)
+				return false
+			}
+			if written {
+				return true
+			}
+		}
+		log.Warn("home kv best-effort codex reasoning replay append exhausted compare-and-swap attempts")
+		return false
+	}
+
+	cacheCleanupOnce.Do(startCacheCleanup)
+	now := time.Now()
+	codexReasoningReplayMu.Lock()
+	entry := codexReasoningReplayEntries[key]
+	if now.Sub(entry.Timestamp) > CodexReasoningReplayCacheTTL {
+		entry.Items = nil
+	}
+	entry.Items = appendCodexReasoningReplayTurn(entry.Items, normalized)
+	entry.Timestamp = now
+	codexReasoningReplayEntries[key] = entry
+	if len(codexReasoningReplayEntries) > CodexReasoningReplayCacheMaxEntries {
+		evictOldestCodexReasoningReplayEntries(CodexReasoningReplayCacheEvictBatchSize)
+	}
+	codexReasoningReplayMu.Unlock()
+	return true
+}
+
+// appendCodexReasoningReplayTurn 合并一轮到累计列表。
+// 兼容路径：若旧缓存没有 turn marker（升级前单轮覆盖写），会丢弃旧数据再按新格式累加。
+// 若同 turnID 已存在则去重，避免重试/重复 complete 事件把同一轮写两次。
+func appendCodexReasoningReplayTurn(existing, turn [][]byte) [][]byte {
+	if len(existing) > 0 && strings.TrimSpace(gjson.GetBytes(existing[0], "type").String()) != CodexReasoningReplayTurnType {
+		existing = nil
+	}
+	turnID := ""
+	if len(turn) > 0 && strings.TrimSpace(gjson.GetBytes(turn[0], "type").String()) == CodexReasoningReplayTurnType {
+		turnID = strings.TrimSpace(gjson.GetBytes(turn[0], "id").String())
+	}
+	if turnID != "" {
+		for _, item := range existing {
+			if strings.TrimSpace(gjson.GetBytes(item, "type").String()) == CodexReasoningReplayTurnType &&
+				strings.TrimSpace(gjson.GetBytes(item, "id").String()) == turnID {
+				return trimCodexReasoningReplayItems(cloneCodexReasoningReplayItems(existing))
+			}
+		}
+	}
+	combined := make([][]byte, 0, len(existing)+len(turn))
+	combined = append(combined, cloneCodexReasoningReplayItems(existing)...)
+	combined = append(combined, cloneCodexReasoningReplayItems(turn)...)
+	return trimCodexReasoningReplayItems(combined)
+}
+
+// trimCodexReasoningReplayItems 按“回合数 + 总字节”裁剪，始终从最早回合删起。
+func trimCodexReasoningReplayItems(items [][]byte) [][]byte {
+	for {
+		turnStarts := []int{0}
+		totalBytes := 0
+		for index, item := range items {
+			totalBytes += len(item)
+			if index > 0 && strings.TrimSpace(gjson.GetBytes(item, "type").String()) == CodexReasoningReplayTurnType {
+				turnStarts = append(turnStarts, index)
+			}
+		}
+		if len(turnStarts) <= CodexReasoningReplayCacheMaxTurnsPerEntry && totalBytes <= CodexReasoningReplayCacheMaxBytesPerEntry {
+			return items
+		}
+		if len(turnStarts) <= 1 {
+			return nil
+		}
+		items = items[turnStarts[1]:]
+	}
+}
+
+// GetCodexReasoningReplayItem retrieves the first normalized upstream replay item.
 func GetCodexReasoningReplayItem(modelName, sessionKey string) ([]byte, bool) {
 	items, ok := GetCodexReasoningReplayItems(modelName, sessionKey)
-	if !ok || len(items) == 0 {
+	if !ok {
 		return nil, false
 	}
-	return items[0], true
+	for _, item := range items {
+		if strings.TrimSpace(gjson.GetBytes(item, "type").String()) != CodexReasoningReplayTurnType {
+			return item, true
+		}
+	}
+	return nil, false
 }
 
 // GetCodexReasoningReplayItems retrieves normalized assistant output items.
@@ -223,12 +360,15 @@ func normalizeCodexReasoningReplayItems(items [][]byte) ([][]byte, bool) {
 			normalized = append(normalized, normalizedItem)
 		}
 	}
+	normalized = trimCodexReasoningReplayItems(normalized)
 	return normalized, len(normalized) > 0
 }
 
 func normalizeCodexReasoningReplayItem(item []byte) ([]byte, bool) {
 	itemResult := gjson.ParseBytes(item)
 	switch strings.TrimSpace(itemResult.Get("type").String()) {
+	case CodexReasoningReplayTurnType:
+		return normalizeCodexReasoningReplayTurn(itemResult)
 	case "reasoning":
 		return normalizeCodexReasoningReplayReasoningItem(itemResult)
 	case "function_call":
@@ -238,6 +378,32 @@ func normalizeCodexReasoningReplayItem(item []byte) ([]byte, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// normalizeCodexReasoningReplayTurn 规范化回合边界 marker。
+// 只保留 id / fingerprint / call_ids 等插入阶段需要的字段。
+func normalizeCodexReasoningReplayTurn(itemResult gjson.Result) ([]byte, bool) {
+	turnID := strings.TrimSpace(itemResult.Get("id").String())
+	if turnID == "" {
+		return nil, false
+	}
+	normalized := []byte(`{"type":"` + CodexReasoningReplayTurnType + `"}`)
+	normalized, _ = sjson.SetBytes(normalized, "id", turnID)
+	if fingerprint := strings.TrimSpace(itemResult.Get("assistant_fingerprint").String()); fingerprint != "" {
+		normalized, _ = sjson.SetBytes(normalized, "assistant_fingerprint", fingerprint)
+	}
+	if fingerprint := strings.TrimSpace(itemResult.Get("request_fingerprint").String()); fingerprint != "" {
+		normalized, _ = sjson.SetBytes(normalized, "request_fingerprint", fingerprint)
+	}
+	callIDs := itemResult.Get("call_ids")
+	if callIDs.IsArray() {
+		for _, callIDResult := range callIDs.Array() {
+			if callID := strings.TrimSpace(callIDResult.String()); callID != "" {
+				normalized, _ = sjson.SetBytes(normalized, "call_ids.-1", callID)
+			}
+		}
+	}
+	return normalized, true
 }
 
 func normalizeCodexReasoningReplayReasoningItem(itemResult gjson.Result) ([]byte, bool) {

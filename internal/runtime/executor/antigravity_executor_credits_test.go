@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	homekv "github.com/NGLSL/CLIProxyAPI/v7/internal/home"
 	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/NGLSL/CLIProxyAPI/v7/sdk/translator"
@@ -588,4 +589,12 @@ func TestAntigravityExecute_DoesNotDirectInjectCreditsWhenFlagDisabled(t *testin
 	if strings.Contains(requestBodies[0], `"enabledCreditTypes":["GOOGLE_ONE_AI"]`) {
 		t.Fatalf("request unexpectedly used enabledCreditTypes with flag disabled: %s", requestBodies[0])
 	}
+}
+
+
+// roundTripperFunc 让单测能把自定义 RoundTrip 塞进 context 的 cliproxy.roundtripper。
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

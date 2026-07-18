@@ -13,6 +13,9 @@ import (
 	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/NGLSL/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus/hooks/test"
+	"github.com/tidwall/gjson"
 )
 
 func testGeminiSignaturePayload() string {
@@ -240,3 +243,5 @@ func TestAntigravityExecutor_CacheModeSkipsPrecheck(t *testing.T) {
 		t.Fatalf("cache mode should skip precheck, got: %v", err)
 	}
 }
+
+

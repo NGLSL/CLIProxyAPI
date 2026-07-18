@@ -2,11 +2,13 @@ package executor
 
 import (
 	"context"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/NGLSL/CLIProxyAPI/v7/sdk/translator"
 	"github.com/gin-gonic/gin"
@@ -304,3 +306,4 @@ func TestCodexExecutorCacheHelper_ClaudeUsesSessionHeader(t *testing.T) {
 		t.Fatalf("same Claude Code session header produced different prompt_cache_key: first=%q second=%q", firstKey, secondKey)
 	}
 }
+

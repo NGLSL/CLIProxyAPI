@@ -117,6 +117,9 @@ func (e *XAIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, 
 }
 
 func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if opts.Alt == "responses/compact" {
+		return e.executeCompact(ctx, auth, req, opts)
+	}
 	if endpointPath := xaiImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, endpointPath)
 	}
@@ -314,6 +317,12 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if opts.Alt == "responses/compact" {
+		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
+	}
+	if xaiInputHasItemType(req.Payload, "compaction_trigger") {
+		return e.executeCompactionTriggerStream(ctx, auth, req, opts)
+	}
 	token, baseURL := xaiCreds(auth)
 	if baseURL == "" {
 		baseURL = xaiauth.DefaultAPIBaseURL
@@ -714,8 +723,11 @@ func xaiUsingAPI(auth *cliproxyauth.Auth) bool {
 	return !strings.EqualFold(xaiMetadataString(auth.Metadata, "auth_kind"), "oauth")
 }
 
-// xaiChatBaseURL selects the HTTP chat endpoint without changing websocket or
-// media routing. Explicit custom base URLs remain authoritative in both modes.
+// xaiChatBaseURL selects the HTTP chat endpoint without changing websocket,
+// compact, or media routing. Explicit custom base URLs remain authoritative.
+// Websocket/compact intentionally do not use this helper: cli-chat-proxy only
+// accepts HTTP POST chat and does not implement /responses/compact (404) or
+// websocket upgrades (405).
 func xaiChatBaseURL(auth *cliproxyauth.Auth) string {
 	_, baseURL := xaiCreds(auth)
 	if xaiUsingAPI(auth) {
@@ -728,6 +740,17 @@ func xaiChatBaseURL(auth *cliproxyauth.Auth) string {
 		return baseURL
 	}
 	return xaiauth.CLIChatProxyBaseURL
+}
+
+// xaiCompactBaseURL 返回 /responses/compact 专用 base。
+// OAuth 默认 chat 会落到 cli-chat-proxy；compact 必须回到官方 API 或显式非 proxy base，
+// 否则 404 会冷却整个 xAI 凭证池。
+func xaiCompactBaseURL(auth *cliproxyauth.Auth) string {
+	_, baseURL := xaiCreds(auth)
+	if baseURL == "" || xaiIsCLIChatProxyBaseURL(baseURL) {
+		return xaiauth.DefaultAPIBaseURL
+	}
+	return baseURL
 }
 
 func xaiNormalizeBaseURL(baseURL string) string {

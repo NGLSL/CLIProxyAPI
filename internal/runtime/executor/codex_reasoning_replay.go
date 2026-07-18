@@ -20,9 +20,15 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// codexReasoningReplayScope 描述一次 Codex reasoning 回放缓存的作用域。
+// modelName + sessionKey 定位缓存桶；requestFingerprint 用于多轮插入时锚定“这一轮输入前缀”。
+// 多 agent 场景下 sessionKey 必须带 agent 维度，否则会互相污染累计 reasoning 状态。
 type codexReasoningReplayScope struct {
 	modelName  string
 	sessionKey string
+	// requestFingerprint 是本轮请求 input 前缀指纹，写入 turn marker，
+	// 下一次插入时用来在多轮历史中找对锚点（尤其是压缩/乱序后重复 assistant 文案）。
+	requestFingerprint string
 }
 
 func (s codexReasoningReplayScope) valid() bool {
@@ -34,8 +40,9 @@ func applyCodexReasoningReplayCache(ctx context.Context, from sdktranslator.Form
 	return updated, scope
 }
 
-// applyCodexReasoningReplayCacheRequired 会把上一轮缓存的 reasoning / tool call
-// 插回当前请求。Required 版本会把 Home KV 等缓存层错误返回给调用方，避免静默丢状态。
+// applyCodexReasoningReplayCacheRequired 读取累计多轮 replay 状态，并按 turn 插入到当前请求 input。
+// 与旧版“只回放最近一轮”不同：这里会按 cpa_codex_replay_turn 切分后逐轮锚点插入。
+// Required 版本会把 Home KV 等缓存层错误返回给调用方，避免静默丢状态。
 func applyCodexReasoningReplayCacheRequired(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) ([]byte, codexReasoningReplayScope, error) {
 	scope := codexReasoningReplayScopeFromRequest(ctx, from, req, opts, body)
 	if !scope.valid() {
@@ -45,24 +52,29 @@ func applyCodexReasoningReplayCacheRequired(ctx context.Context, from sdktransla
 	if errReplay != nil || !ok {
 		return body, scope, errReplay
 	}
-	items = filterCodexReasoningReplayItemsForInput(body, items)
-	if len(items) == 0 {
-		return body, scope, nil
-	}
-	updated, ok := insertCodexReasoningReplayItems(body, items)
+	// 多轮路径：按 turn marker 切分后逐轮过滤/插入；兼容旧单轮缓存时也会走同一套逻辑。
+	updated, ok := insertCodexReasoningReplayTurns(body, items)
 	if !ok {
 		return body, scope, nil
 	}
 	return updated, scope, nil
 }
 
+// codexReasoningReplayScopeFromRequest 从当前请求构造回放作用域。
+// requestFingerprint 取“完整 input 前缀”，用于完成响应时给本轮 turn 打锚。
 func codexReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) codexReasoningReplayScope {
 	if !codexReasoningReplayEnabledForSource(from) {
 		return codexReasoningReplayScope{}
 	}
+	modelName := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if modelName == "" {
+		modelName = thinking.ParseSuffix(req.Model).ModelName
+	}
+	inputItems := gjson.GetBytes(body, "input").Array()
 	return codexReasoningReplayScope{
-		modelName:  thinking.ParseSuffix(req.Model).ModelName,
-		sessionKey: codexReasoningReplaySessionKey(ctx, from, req, opts, body),
+		modelName:          modelName,
+		sessionKey:         codexReasoningReplaySessionKey(ctx, from, req, opts, body),
+		requestFingerprint: codexReplayInputPrefixFingerprint(inputItems, len(inputItems)),
 	}
 }
 
@@ -74,17 +86,28 @@ func sourceFormatEqual(from, want sdktranslator.Format) bool {
 	return strings.EqualFold(strings.TrimSpace(from.String()), want.String())
 }
 
+// codexClaudeCodeReplaySessionKey 返回 Claude Code 的 reasoning replay 作用域。
+// 必须包含 agent 维度，否则同会话多 agent 会读写同一份累计 replay 状态。
 func codexClaudeCodeReplaySessionKey(ctx context.Context, payload []byte, headers http.Header) string {
-	sessionID := helps.ExtractClaudeCodeSessionID(ctx, payload, headers)
-	if sessionID == "" {
+	sessionKey, ok := helps.ClaudeCodeExecutionScope(ctx, payload, headers)
+	if !ok {
 		return ""
 	}
-	return "claude:" + sessionID
+	return sessionKey
 }
 
+// codexReasoningReplaySessionKey 选择当前请求的 replay 连续性边界。
+// Claude Code 路径优先使用 session+agent 作用域，避免被 execution-session 等粗粒度 key 抢先，
+// 导致多 agent 仍落在同一桶。
 func codexReasoningReplaySessionKey(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) string {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	// Claude Code：先按 session+agent 分桶，这是多 agent 隔离的主路径。
+	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
+		if sessionKey := codexClaudeCodeReplaySessionKey(ctx, req.Payload, opts.Headers); sessionKey != "" {
+			return sessionKey
+		}
 	}
 	if value := metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
 		return "execution:" + value
@@ -105,9 +128,6 @@ func codexReasoningReplaySessionKey(ctx context.Context, from sdktranslator.Form
 		if value := codexReasoningReplaySessionKeyFromHeaders(ginCtx.Request.Header); value != "" {
 			return value
 		}
-	}
-	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
-		return codexClaudeCodeReplaySessionKey(ctx, req.Payload, opts.Headers)
 	}
 	if sourceFormatEqual(from, sdktranslator.FormatOpenAI) {
 		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
@@ -186,6 +206,278 @@ func codexInputHasValidReasoningEncryptedContent(body []byte) bool {
 	return false
 }
 
+// codexReasoningReplayTurn 表示缓存中的一个完整上游回合。
+// marked=true 表示来自带 cpa_codex_replay_turn 的新格式；false 表示兼容旧单轮缓存。
+type codexReasoningReplayTurn struct {
+	marked               bool
+	assistantFingerprint string
+	requestFingerprint   string
+	callIDs              []string
+	items                [][]byte
+}
+
+// insertCodexReasoningReplayTurns 把累计多轮 replay 插入当前 Responses input。
+// 链路：
+// 1) splitCodexReasoningReplayTurns 按 marker 切分历史回合
+// 2) 从后往前找每轮在 input 中的锚点（assistant 文案 / tool output / request 前缀）
+// 3) 过滤本轮已存在的 item，对齐 call_id 后插入
+// 这样多轮 tool 循环和压缩后的局部历史都能尽量找对位置。
+func insertCodexReasoningReplayTurns(body []byte, replayItems [][]byte) ([]byte, bool) {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() || len(replayItems) == 0 {
+		return body, false
+	}
+	inputItems := input.Array()
+	turns := splitCodexReasoningReplayTurns(replayItems)
+	insertions := make(map[int][][]byte)
+	usedAnchorIndexes := make(map[int]bool)
+	fallbackAnchorEnd := len(inputItems) - 1
+	inserted := false
+	for turnIndex := len(turns) - 1; turnIndex >= 0; turnIndex-- {
+		turn := turns[turnIndex]
+		if len(turn.items) == 0 {
+			continue
+		}
+		if !turn.marked {
+			items := filterCodexReasoningReplayItemsForInput(body, turn.items)
+			if len(items) == 0 {
+				continue
+			}
+			index := codexReasoningReplayInsertIndex(inputItems, items)
+			items = codexAlignReasoningReplayToolCallIDs(inputItems, items)
+			insertions[index] = append(items, insertions[index]...)
+			inserted = true
+			continue
+		}
+
+		anchorIndex, matched := codexReasoningReplayTurnAnchorIndex(inputItems, turn, fallbackAnchorEnd, usedAnchorIndexes)
+		if !matched {
+			continue
+		}
+		usedAnchorIndexes[anchorIndex] = true
+		if turn.requestFingerprint == "" {
+			fallbackAnchorEnd = anchorIndex - 1
+		}
+		items := filterCodexReasoningReplayTurnItems(inputItems, turn.items)
+		if len(items) == 0 {
+			continue
+		}
+		items = codexAlignReasoningReplayToolCallIDs(inputItems, items)
+		insertions[anchorIndex] = append(items, insertions[anchorIndex]...)
+		inserted = true
+	}
+	if !inserted {
+		return body, false
+	}
+
+	items := make([]string, 0, len(inputItems)+len(replayItems))
+	for index, inputItem := range inputItems {
+		for _, replayItem := range insertions[index] {
+			items = append(items, string(replayItem))
+		}
+		items = append(items, inputItem.Raw)
+	}
+	for _, replayItem := range insertions[len(inputItems)] {
+		items = append(items, string(replayItem))
+	}
+	updated, err := sjson.SetRawBytes(body, "input", []byte("["+strings.Join(items, ",")+"]"))
+	if err != nil {
+		return body, false
+	}
+	return updated, true
+}
+
+// splitCodexReasoningReplayTurns 按 turn marker 切分累计缓存。
+// 若首项不是 marker，整段按旧版“单轮覆盖写”兼容处理。
+func splitCodexReasoningReplayTurns(items [][]byte) []codexReasoningReplayTurn {
+	turns := make([]codexReasoningReplayTurn, 0)
+	current := codexReasoningReplayTurn{}
+	appendCurrent := func() {
+		if len(current.items) > 0 {
+			turns = append(turns, current)
+		}
+	}
+	for _, item := range items {
+		itemResult := gjson.ParseBytes(item)
+		if strings.TrimSpace(itemResult.Get("type").String()) == internalcache.CodexReasoningReplayTurnType {
+			appendCurrent()
+			current = codexReasoningReplayTurn{
+				marked:               true,
+				assistantFingerprint: strings.TrimSpace(itemResult.Get("assistant_fingerprint").String()),
+				requestFingerprint:   strings.TrimSpace(itemResult.Get("request_fingerprint").String()),
+			}
+			if callIDs := itemResult.Get("call_ids"); callIDs.IsArray() {
+				for _, callIDResult := range callIDs.Array() {
+					if callID := strings.TrimSpace(callIDResult.String()); callID != "" {
+						current.callIDs = append(current.callIDs, callID)
+					}
+				}
+			}
+			continue
+		}
+		current.items = append(current.items, item)
+	}
+	appendCurrent()
+	return turns
+}
+
+// codexReasoningReplayTurnAnchorIndex 为某一历史回合在当前 input 中找插入锚点。
+// 优先 request_fingerprint，其次 assistant 文案指纹，再次 tool call_id 对应 output。
+// used 防止多轮命中同一个锚点索引。
+func codexReasoningReplayTurnAnchorIndex(inputItems []gjson.Result, turn codexReasoningReplayTurn, fallbackEnd int, used map[int]bool) (int, bool) {
+	searchEnd := fallbackEnd
+	if turn.requestFingerprint != "" {
+		searchEnd = len(inputItems) - 1
+	}
+	if searchEnd >= len(inputItems) {
+		searchEnd = len(inputItems) - 1
+	}
+	matchesRequestPrefix := func(index int) bool {
+		return turn.requestFingerprint == "" || codexReplayInputPrefixFingerprint(inputItems, index) == turn.requestFingerprint
+	}
+	if len(turn.callIDs) > 0 {
+		callIDs := make(map[string]bool)
+		for _, callID := range turn.callIDs {
+			for _, candidate := range codexReplayComparableCallIDs(callID) {
+				callIDs[candidate] = true
+			}
+		}
+		for index := searchEnd; index >= 0; index-- {
+			if used[index] || !matchesRequestPrefix(index) {
+				continue
+			}
+			itemType := strings.TrimSpace(inputItems[index].Get("type").String())
+			if itemType != "function_call" && itemType != "custom_tool_call" && itemType != "function_call_output" && itemType != "custom_tool_call_output" {
+				continue
+			}
+			for _, candidate := range codexReplayComparableCallIDs(inputItems[index].Get("call_id").String()) {
+				if callIDs[candidate] {
+					return index, true
+				}
+			}
+		}
+	}
+	if turn.assistantFingerprint != "" {
+		for index := searchEnd; index >= 0; index-- {
+			if used[index] || !matchesRequestPrefix(index) {
+				continue
+			}
+			if codexReplayAssistantMessageFingerprint(inputItems[index]) == turn.assistantFingerprint {
+				return index, true
+			}
+		}
+	}
+	if len(turn.callIDs) == 0 && turn.assistantFingerprint == "" {
+		return codexReasoningReplayInsertIndex(inputItems, turn.items), true
+	}
+	return 0, false
+}
+
+// filterCodexReasoningReplayTurnItems 过滤单轮中已经出现在 input 的 item，
+// 并丢掉没有对应 tool output 的 function/custom tool call，避免上游签名校验失败。
+func filterCodexReasoningReplayTurnItems(inputItems []gjson.Result, items [][]byte) [][]byte {
+	existingReasoning := make(map[string]bool)
+	existingCalls := make(map[string]bool)
+	existingOutputs := make(map[string]bool)
+	for _, inputItem := range inputItems {
+		itemType := strings.TrimSpace(inputItem.Get("type").String())
+		switch itemType {
+		case "reasoning":
+			if encryptedContent := strings.TrimSpace(inputItem.Get("encrypted_content").String()); encryptedContent != "" {
+				existingReasoning[encryptedContent] = true
+			}
+		case "function_call_output", "custom_tool_call_output":
+			for _, candidate := range codexReplayComparableCallIDs(inputItem.Get("call_id").String()) {
+				existingOutputs[candidate] = true
+			}
+		}
+		for _, key := range codexReplayToolCallKeys(inputItem) {
+			existingCalls[key] = true
+		}
+	}
+
+	filtered := make([][]byte, 0, len(items))
+	for _, item := range items {
+		itemResult := gjson.ParseBytes(item)
+		switch strings.TrimSpace(itemResult.Get("type").String()) {
+		case "reasoning":
+			if existingReasoning[strings.TrimSpace(itemResult.Get("encrypted_content").String())] {
+				continue
+			}
+		case "function_call", "custom_tool_call":
+			keys := codexReplayToolCallKeys(itemResult)
+			if len(keys) == 0 || codexReplayAnyToolCallKeyExists(existingCalls, keys) {
+				continue
+			}
+			hasMatchingOutput := false
+			for _, candidate := range codexReplayComparableCallIDs(itemResult.Get("call_id").String()) {
+				if existingOutputs[candidate] {
+					hasMatchingOutput = true
+					break
+				}
+			}
+			if !hasMatchingOutput {
+				continue
+			}
+			for _, key := range keys {
+				existingCalls[key] = true
+			}
+		default:
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+// codexReplayAssistantMessageFingerprint 提取 assistant message 的稳定文本指纹，用于跨轮锚点匹配。
+func codexReplayAssistantMessageFingerprint(item gjson.Result) string {
+	itemType := strings.TrimSpace(item.Get("type").String())
+	if itemType != "" && itemType != "message" {
+		return ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(item.Get("role").String()), "assistant") {
+		return ""
+	}
+	content := item.Get("content")
+	var builder strings.Builder
+	if content.Type == gjson.String {
+		builder.WriteString(content.String())
+	} else if content.IsArray() {
+		for _, part := range content.Array() {
+			switch strings.TrimSpace(part.Get("type").String()) {
+			case "input_text", "output_text":
+				builder.WriteString(part.Get("text").String())
+			case "refusal":
+				builder.WriteString("\x00refusal\x00")
+				builder.WriteString(part.Get("refusal").String())
+			default:
+				return ""
+			}
+		}
+	} else {
+		return ""
+	}
+	if builder.Len() == 0 {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(builder.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+// codexReplayInputPrefixFingerprint 对 input[0:end] 做内容哈希，作为“请求前缀”指纹。
+func codexReplayInputPrefixFingerprint(inputItems []gjson.Result, end int) string {
+	if end < 0 || end > len(inputItems) {
+		return ""
+	}
+	hasher := sha256.New()
+	for index := 0; index < end; index++ {
+		_, _ = hasher.Write([]byte("\x00item\x00"))
+		_, _ = hasher.Write([]byte(inputItems[index].Raw))
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
 func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() {
@@ -223,6 +515,7 @@ func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]by
 			if len(keys) == 0 || codexReplayAnyToolCallKeyExists(existingCalls, keys) {
 				continue
 			}
+			// Only inject if there is a matching output in the request
 			hasMatchingOutput := false
 			callID := strings.TrimSpace(itemResult.Get("call_id").String())
 			if callID != "" {
@@ -247,6 +540,8 @@ func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]by
 	return filtered
 }
 
+// insertCodexReasoningReplayItems 是旧的单轮插入路径，仍被 xAI 等调用方使用。
+// Codex Claude 主路径已改走 insertCodexReasoningReplayTurns。
 func insertCodexReasoningReplayItems(body []byte, replayItems [][]byte) ([]byte, bool) {
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() || len(replayItems) == 0 {
@@ -445,6 +740,12 @@ func shortenCodexReplayCallIDIfNeeded(id string) string {
 	return id[:prefixLen] + suffix
 }
 
+// cacheCodexReasoningReplayFromCompleted 在 response.completed 后追加“本轮”到累计缓存。
+// 关键链路：
+// 1) 从 completed 的 response.output 抽出 reasoning / tool call
+// 2) 计算 turn id（含 requestFingerprint + assistant 指纹 + call_ids + items）
+// 3) 构造 cpa_codex_replay_turn marker 并放在本轮 items 前面
+// 4) Append 而不是覆盖写，保留多轮历史
 func cacheCodexReasoningReplayFromCompleted(scope codexReasoningReplayScope, completedData []byte) {
 	if !scope.valid() {
 		return
@@ -453,18 +754,55 @@ func cacheCodexReasoningReplayFromCompleted(scope codexReasoningReplayScope, com
 	if !output.IsArray() {
 		return
 	}
-	items := make([][]byte, 0, len(output.Array()))
+	replayItems := make([][]byte, 0, len(output.Array()))
+	callIDs := make([]string, 0)
+	assistantFingerprint := ""
 	for _, item := range output.Array() {
 		switch strings.TrimSpace(item.Get("type").String()) {
-		case "reasoning", "function_call", "custom_tool_call":
-			items = append(items, []byte(item.Raw))
-		default:
-			continue
+		case "reasoning":
+			replayItems = append(replayItems, []byte(item.Raw))
+		case "function_call", "custom_tool_call":
+			replayItems = append(replayItems, []byte(item.Raw))
+			if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+				callIDs = append(callIDs, callID)
+			}
+		case "message":
+			if fingerprint := codexReplayAssistantMessageFingerprint(item); fingerprint != "" {
+				assistantFingerprint = fingerprint
+			}
 		}
 	}
-	if !internalcache.CacheCodexReasoningReplayItemsBestEffort(context.Background(), scope.modelName, scope.sessionKey, items) {
-		internalcache.DeleteCodexReasoningReplayItem(scope.modelName, scope.sessionKey)
+	if len(replayItems) == 0 {
+		return
 	}
+
+	// turn id 必须对“同一轮完整输出”稳定，这样重试 complete 时 Append 侧可按 id 去重。
+	hasher := sha256.New()
+	_, _ = hasher.Write([]byte(scope.requestFingerprint))
+	_, _ = hasher.Write([]byte("\x00assistant\x00" + assistantFingerprint))
+	for _, callID := range callIDs {
+		_, _ = hasher.Write([]byte("\x00call\x00" + callID))
+	}
+	for _, item := range replayItems {
+		_, _ = hasher.Write([]byte("\x00item\x00"))
+		_, _ = hasher.Write(item)
+	}
+	marker := []byte(`{"type":"` + internalcache.CodexReasoningReplayTurnType + `"}`)
+	marker, _ = sjson.SetBytes(marker, "id", hex.EncodeToString(hasher.Sum(nil)))
+	if assistantFingerprint != "" {
+		marker, _ = sjson.SetBytes(marker, "assistant_fingerprint", assistantFingerprint)
+	}
+	if scope.requestFingerprint != "" {
+		marker, _ = sjson.SetBytes(marker, "request_fingerprint", scope.requestFingerprint)
+	}
+	for _, callID := range callIDs {
+		marker, _ = sjson.SetBytes(marker, "call_ids.-1", callID)
+	}
+	items := make([][]byte, 0, len(replayItems)+1)
+	items = append(items, marker)
+	items = append(items, replayItems...)
+	// 关键点：累计追加，而不是覆盖上一轮。
+	internalcache.AppendCodexReasoningReplayItemsBestEffort(context.Background(), scope.modelName, scope.sessionKey, items)
 }
 
 func clearCodexReasoningReplayOnInvalidSignature(ctx context.Context, scope codexReasoningReplayScope, statusCode int, body []byte) error {

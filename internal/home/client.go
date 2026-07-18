@@ -637,6 +637,46 @@ func (c *Client) KVSetNX(ctx context.Context, key string, value []byte, ttl time
 	return c.KVSet(ctx, key, value, opts)
 }
 
+// KVCompareAndSwap 仅当当前值与期望状态一致时原子替换。
+// 用于 Home 模式下多 turn 累加 reasoning replay 时的并发安全写入：
+// 1) 先 KVGet 读出 expected
+// 2) 本地拼出新 value
+// 3) 用本方法 CAS 写回；若期间被其他请求改过则返回 false，调用方重试
+// expectedExists=false 表示期望 key 当前不存在；expected 为期望的原始字节内容。
+func (c *Client) KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, value []byte, ttl time.Duration) (bool, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return false, errClient
+	}
+	// Redis Lua：检查 GET 结果是否匹配 expected，再 SET（可选 PX TTL）
+	const script = `
+local current = redis.call("GET", KEYS[1])
+if ARGV[1] == "1" then
+  if not current or current ~= ARGV[2] then
+    return 0
+  end
+elseif current then
+  return 0
+end
+local ttl = tonumber(ARGV[4])
+if ttl and ttl > 0 then
+  redis.call("SET", KEYS[1], ARGV[3], "PX", ttl)
+else
+  redis.call("SET", KEYS[1], ARGV[3])
+end
+return 1
+`
+	expectedFlag := "0"
+	if expectedExists {
+		expectedFlag = "1"
+	}
+	result, errEval := cmd.Eval(ctx, script, []string{key}, expectedFlag, expected, value, durationCeil(ttl, time.Millisecond)).Int64()
+	if errEval != nil {
+		return false, errEval
+	}
+	return result == 1, nil
+}
+
 func (c *Client) KVDel(ctx context.Context, keys ...string) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil

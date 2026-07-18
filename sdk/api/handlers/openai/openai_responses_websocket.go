@@ -42,6 +42,13 @@ const (
 	wsHeaderOpenAIModel  = "openai-model"
 )
 
+// responsesWebsocketPinnedAuthState 记录某个 provider 上一次成功 pin 的 auth 与 model。
+// 下游同一 WS 会话可能切换模型/供应商，不能只用全局 pinnedAuthID，否则会把 A 供应商的粘性带到 B 供应商。
+type responsesWebsocketPinnedAuthState struct {
+	authID   string
+	modelKey string
+}
+
 var responsesWebsocketUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
@@ -279,16 +286,47 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	lastResponseID := ""
 	var lastResponsePendingToolCallIDs []string
 	pinnedAuthID := ""
+	// 按 provider 独立保存 auth 粘性：切换供应商时互不污染。
+	pinnedAuthByProvider := make(map[string]responsesWebsocketPinnedAuthState)
 	lastAttemptedAuthID := ""
 	passthroughModelName := ""
-	sessionAuthByID := func(authID string) (*coreauth.Auth, bool) {
+	// sessionAuthByIDWithSource 额外返回是否来自 execution-session 缓存（home runtime）。
+	sessionAuthByIDWithSource := func(authID string) (*coreauth.Auth, bool, bool) {
 		if h == nil || h.AuthManager == nil {
-			return nil, false
+			return nil, false, false
 		}
 		if auth, ok := h.AuthManager.GetExecutionSessionAuthByID(passthroughSessionID, authID); ok {
-			return auth, true
+			return auth, true, true
 		}
-		return h.AuthManager.GetByID(authID)
+		auth, ok := h.AuthManager.GetByID(authID)
+		return auth, false, ok
+	}
+	sessionAuthByID := func(authID string) (*coreauth.Auth, bool) {
+		auth, _, ok := sessionAuthByIDWithSource(authID)
+		return auth, ok
+	}
+	// rememberPinnedAuth 在请求成功选中可增量上游时，同时写入当前 pin 与 provider 映射。
+	rememberPinnedAuth := func(authID string, modelName string) {
+		authID = strings.TrimSpace(authID)
+		auth, ok := sessionAuthByID(authID)
+		if authID == "" || !ok || auth == nil {
+			return
+		}
+		pinnedAuthID = authID
+		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+		_, modelKey := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(modelName))
+		if providerKey != "" {
+			pinnedAuthByProvider[providerKey] = responsesWebsocketPinnedAuthState{authID: authID, modelKey: modelKey}
+		}
+	}
+	// forgetPinnedAuth 在 408/断流等场景释放当前 pin，并清理 provider 映射中的对应项。
+	forgetPinnedAuth := func() {
+		for providerKey, state := range pinnedAuthByProvider {
+			if state.authID == pinnedAuthID {
+				delete(pinnedAuthByProvider, providerKey)
+			}
+		}
+		pinnedAuthID = ""
 	}
 	forceTranscriptReplayNextRequest := false
 
@@ -316,24 +354,52 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		wsTimelineLog.BeginRequest()
 		wsTimelineLog.Append("request", payload, time.Now())
 
-		requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+		explicitRequestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+		requestModelName := explicitRequestModelName
 		if requestModelName == "" {
 			requestModelName = passthroughModelName
 		}
 		if requestModelName == "" {
 			requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 		}
+		// 校验当前 pin 是否仍匹配本次模型/供应商；不匹配则清空，避免跨供应商粘性。
+		if pinnedAuthID != "" {
+			pinnedAuth, homeRuntime, ok := sessionAuthByIDWithSource(pinnedAuthID)
+			providerKey := ""
+			if pinnedAuth != nil {
+				providerKey = strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
+			}
+			state, hasState := pinnedAuthByProvider[providerKey]
+			if !ok || !hasState || state.authID != pinnedAuthID || !responsesWebsocketPinnedAuthMatchesModel(pinnedAuth, requestModelName, state.modelKey, homeRuntime) {
+				pinnedAuthID = ""
+			}
+		}
+		// 当前无 pin 时，若模型只对应单一 provider，尝试恢复该 provider 的历史 pin。
+		if pinnedAuthID == "" {
+			providerSet, _ := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(requestModelName))
+			if len(providerSet) == 1 {
+				for providerKey := range providerSet {
+					state, ok := pinnedAuthByProvider[providerKey]
+					candidateAuth, homeRuntime, okAuth := sessionAuthByIDWithSource(state.authID)
+					if ok && okAuth && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, requestModelName, state.modelKey, homeRuntime) {
+						pinnedAuthID = state.authID
+					} else {
+						delete(pinnedAuthByProvider, providerKey)
+					}
+				}
+			}
+		}
 		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
+		if explicitRequestModelName != "" && !useUpstreamWebsocketPassthrough {
+			// 非上游 WS 透传时，显式模型覆盖旧的 passthrough 模型缓存。
+			passthroughModelName = ""
+		}
 		allowIncrementalInputWithPreviousResponseID := false
 		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
+			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
 				allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
 			}
 		} else {
-			requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
-			if requestModelName == "" {
-				requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
-			}
 			allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
 		}
 		if forceTranscriptReplayNextRequest {
@@ -342,7 +408,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 		allowCompactionReplayBypass := false
 		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
+			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
 				allowCompactionReplayBypass = responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
 			}
 		}
@@ -429,6 +495,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		modelName := gjson.GetBytes(requestJSON, "model").String()
+		lastAttemptedAuthID = pinnedAuthID
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
@@ -446,7 +513,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 					return
 				}
 				if websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata) {
-					pinnedAuthID = authID
+					rememberPinnedAuth(authID, modelName)
 				}
 			})
 		}
@@ -466,16 +533,16 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if forwardErrMsg == nil && !useUpstreamWebsocketPassthrough && lastAttemptedAuthID != "" {
 			if selectedAuth, ok := sessionAuthByID(lastAttemptedAuthID); ok && selectedAuth != nil {
 				if websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata) {
-					pinnedAuthID = lastAttemptedAuthID
+					rememberPinnedAuth(lastAttemptedAuthID, modelName)
 				} else if pinnedAuthID != "" {
 					if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil && websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata) {
-						pinnedAuthID = lastAttemptedAuthID
+						rememberPinnedAuth(lastAttemptedAuthID, modelName)
 					}
 				}
 			}
 		}
 		if shouldReleaseResponsesWebsocketPinnedAuth(forwardErrMsg) {
-			pinnedAuthID = ""
+			forgetPinnedAuth()
 			forceTranscriptReplayNextRequest = true
 			if useUpstreamWebsocketPassthrough {
 				passthroughModelName = ""
@@ -1151,6 +1218,28 @@ func responsesWebsocketAuthSupportsIncrementalInput(auth *coreauth.Auth) bool {
 		return false
 	}
 	return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
+}
+
+
+// responsesWebsocketPinnedAuthMatchesModel 判断 pin 的 auth 是否仍可用于当前请求模型。
+// homeRuntime=true 时只比对 modelKey；否则走全局 registry 的 ClientSupportsModel。
+func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName string, pinnedModelKey string, homeRuntime bool) bool {
+	if auth == nil {
+		return false
+	}
+	providerSet, modelKey := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(modelName))
+	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if _, ok := providerSet[providerKey]; !ok {
+		return false
+	}
+	if !responsesWebsocketAuthAvailableForModel(auth, modelKey, time.Now()) {
+		return false
+	}
+
+	if homeRuntime {
+		return strings.EqualFold(strings.TrimSpace(pinnedModelKey), strings.TrimSpace(modelKey))
+	}
+	return registry.GetGlobalRegistry().ClientSupportsModel(auth.ID, modelKey)
 }
 
 func normalizeResponsesWebsocketPassthroughRequest(rawJSON []byte, modelName string) ([]byte, *interfaces.ErrorMessage) {

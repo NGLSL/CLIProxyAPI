@@ -31,7 +31,9 @@ func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Aut
 
 func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (prepared *xaiPreparedRequest, data []byte, headers http.Header, err error) {
 	token, _ := xaiCreds(auth)
-	baseURL := xaiChatBaseURL(auth)
+	// Compact 不能走 xaiChatBaseURL：cli-chat-proxy 对 /responses/compact 返回 404，
+	// 404 会把整个 xAI auth 池打进冷却，表现为“偶发全挂”。
+	baseURL := xaiCompactBaseURL(auth)
 
 	prepared, err = e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
 	if err != nil {
@@ -53,7 +55,8 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	applyXAIChatHeaders(httpReq, auth, token, false, prepared.sessionID)
+	// compact 走官方 API/自定义 base，用标准 API headers，不要挂 CLI chat-proxy 身份头。
+	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
