@@ -1,7 +1,6 @@
 package helps
 
 import (
-	"net/http"
 	"testing"
 
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"

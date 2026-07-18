@@ -3,7 +3,6 @@ package executor
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -590,7 +589,6 @@ func TestAntigravityExecute_DoesNotDirectInjectCreditsWhenFlagDisabled(t *testin
 		t.Fatalf("request unexpectedly used enabledCreditTypes with flag disabled: %s", requestBodies[0])
 	}
 }
-
 
 // roundTripperFunc 让单测能把自定义 RoundTrip 塞进 context 的 cliproxy.roundtripper。
 type roundTripperFunc func(*http.Request) (*http.Response, error)

@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -10,6 +9,7 @@ import (
 	internalconfig "github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/NGLSL/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 type schedulerTestExecutor struct{}

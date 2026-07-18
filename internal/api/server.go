@@ -1351,6 +1351,73 @@ func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
 	return action == id || action == "models/"+id || normalizedAction == normalizedID
 }
 
+// homeModelsAuthStatus 将 Home /models 错误体映射为 HTTP 状态码。
+// no_credentials / invalid_credential -> 401；其它已知 error.type -> 502。
+// 返回 handled=false 表示不是可识别的错误体，调用方继续走默认逻辑。
+func homeModelsAuthStatus(raw []byte) (int, bool) {
+	errType := homeModelsErrorType(raw)
+	if errType == "" {
+		return 0, false
+	}
+	if errType == "no_credentials" || errType == "invalid_credential" {
+		return http.StatusUnauthorized, true
+	}
+	return http.StatusBadGateway, true
+}
+
+// homeModelsErrorType 读取 {"error":{"type":"..."}} 中的 type。
+func homeModelsErrorType(raw []byte) string {
+	top, ok := unmarshalHomeModelsTopLevel(raw)
+	if !ok {
+		return ""
+	}
+	rawErr, exists := top["error"]
+	if !exists {
+		return ""
+	}
+	var errObj struct {
+		Type string `json:"type"`
+	}
+	if errUnmarshal := json.Unmarshal(rawErr, &errObj); errUnmarshal != nil {
+		return ""
+	}
+	return strings.TrimSpace(errObj.Type)
+}
+
+// homeModelsErrorMessage 读取错误 message；缺失时返回稳定默认文案，避免空 body 难排查。
+func homeModelsErrorMessage(raw []byte) string {
+	top, ok := unmarshalHomeModelsTopLevel(raw)
+	if !ok {
+		return "home models request failed"
+	}
+	rawErr, exists := top["error"]
+	if !exists {
+		return "home models request failed"
+	}
+	var errObj struct {
+		Message string `json:"message"`
+	}
+	if errUnmarshal := json.Unmarshal(rawErr, &errObj); errUnmarshal != nil {
+		return "home models request failed"
+	}
+	if msg := strings.TrimSpace(errObj.Message); msg != "" {
+		return msg
+	}
+	return "home models request failed"
+}
+
+// unmarshalHomeModelsTopLevel 将 Home /models 响应解成顶层 map，便于错误分支读取。
+func unmarshalHomeModelsTopLevel(raw []byte) (map[string]json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var top map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(raw, &top); errUnmarshal != nil || top == nil {
+		return nil, false
+	}
+	return top, true
+}
+
 func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("home models payload is empty")

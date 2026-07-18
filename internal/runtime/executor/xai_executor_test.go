@@ -2,9 +2,12 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
@@ -110,8 +113,8 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		t.Fatalf("input.2 exists, want consecutive reasoning item merged; body=%s", string(gotBody))
 	}
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 5 {
-		t.Fatalf("tools length = %d, want 5; body=%s", len(tools), string(gotBody))
+	if len(tools) != 6 {
+		t.Fatalf("tools length = %d, want 6; body=%s", len(tools), string(gotBody))
 	}
 	foundAutomationUpdate := false
 	foundNamespaceCustom := false
@@ -120,8 +123,9 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		if toolType == "image_generation" {
 			t.Fatalf("tools.%d.type = image_generation, want removed; body=%s", i, string(gotBody))
 		}
-		if toolType != "function" && toolType != "web_search" {
-			t.Fatalf("tools.%d.type = %q, want function or web_search; body=%s", i, toolType, string(gotBody))
+		// fork 会在 normalize 后保留/注入原生 x_search，便于 Grok 走站内检索。
+		if toolType != "function" && toolType != "web_search" && toolType != "x_search" {
+			t.Fatalf("tools.%d.type = %q, want function/web_search/x_search; body=%s", i, toolType, string(gotBody))
 		}
 		if toolType == "function" && !tool.Get("parameters").Exists() {
 			t.Fatalf("tools.%d.parameters missing for xAI function tool; body=%s", i, string(gotBody))
@@ -130,9 +134,9 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
 		}
 		switch tool.Get("name").String() {
-		case "automation_update":
+		case "codex_app__automation_update":
 			foundAutomationUpdate = true
-		case "namespace_custom":
+		case "codex_app__namespace_custom":
 			foundNamespaceCustom = true
 		}
 		if toolType == "web_search" {
@@ -150,10 +154,15 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	if !foundNamespaceCustom {
 		t.Fatalf("namespace custom tool was not moved to top-level tools; body=%s", string(gotBody))
 	}
+	// fork 的 xAI reasoning replay 依赖 encrypted_content 回传，因此保留 include 项。
+	hasEncryptedInclude := false
 	for _, include := range gjson.GetBytes(gotBody, "include").Array() {
 		if include.String() == "reasoning.encrypted_content" {
-			t.Fatalf("xai request must not ask for encrypted reasoning content: %s", string(gotBody))
+			hasEncryptedInclude = true
 		}
+	}
+	if !hasEncryptedInclude {
+		t.Fatalf("xai request should keep reasoning.encrypted_content include for replay: %s", string(gotBody))
 	}
 }
 
@@ -275,8 +284,8 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	}
 
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 5 {
-		t.Fatalf("tools length = %d, want 5; body=%s", len(tools), string(gotBody))
+	if len(tools) != 6 {
+		t.Fatalf("tools length = %d, want 6; body=%s", len(tools), string(gotBody))
 	}
 	if gjson.GetBytes(gotBody, "input.0.content").Exists() {
 		t.Fatalf("input.0.content exists, want removed; body=%s", string(gotBody))
@@ -303,8 +312,9 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 		if toolType == "image_generation" {
 			t.Fatalf("tools.%d.type = image_generation, want removed; body=%s", i, string(gotBody))
 		}
-		if toolType != "function" && toolType != "web_search" {
-			t.Fatalf("tools.%d.type = %q, want function or web_search; body=%s", i, toolType, string(gotBody))
+		// fork 会在 normalize 后保留/注入原生 x_search，便于 Grok 走站内检索。
+		if toolType != "function" && toolType != "web_search" && toolType != "x_search" {
+			t.Fatalf("tools.%d.type = %q, want function/web_search/x_search; body=%s", i, toolType, string(gotBody))
 		}
 		if toolType == "function" && !tool.Get("parameters").Exists() {
 			t.Fatalf("tools.%d.parameters missing for xAI function tool; body=%s", i, string(gotBody))
@@ -313,9 +323,9 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
 		}
 		switch tool.Get("name").String() {
-		case "automation_update":
+		case "codex_app__automation_update":
 			foundAutomationUpdate = true
-		case "namespace_custom":
+		case "codex_app__namespace_custom":
 			foundNamespaceCustom = true
 		}
 		if toolType == "web_search" {
@@ -593,7 +603,6 @@ func TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath(t *testing.T)
 	}
 }
 
-
 func TestNormalizeXAITools_SimplifiesAutomationUpdateSchema(t *testing.T) {
 	// 仅 codex_app.automation_update 应被简化；同名其它 namespace 或普通 function 保持原样。
 	params := `{"oneOf":[{"type":"object","properties":{"mode":{"type":"string"}}}],"$defs":{"a":{"type":"string"}},"x":"` + strings.Repeat("y", 1600) + `"}`
@@ -608,7 +617,7 @@ func TestNormalizeXAITools_SimplifiesAutomationUpdateSchema(t *testing.T) {
 	foundExec := false
 	for _, tool := range tools.Array() {
 		switch tool.Get("name").String() {
-		case "automation_update":
+		case "codex_app__automation_update":
 			foundAuto = true
 			paramsRaw := tool.Get("parameters").Raw
 			if strings.Contains(paramsRaw, `"oneOf"`) || strings.Contains(paramsRaw, `"$defs"`) {
@@ -631,7 +640,7 @@ func TestNormalizeXAITools_SimplifiesAutomationUpdateSchema(t *testing.T) {
 		}
 	}
 	if !foundAuto {
-		t.Fatalf("automation_update tool missing after normalize: %s", string(out))
+		t.Fatalf("codex_app__automation_update tool missing after normalize: %s", string(out))
 	}
 	if !foundExec {
 		t.Fatalf("exec_command tool missing after normalize: %s", string(out))
@@ -652,3 +661,20 @@ func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
 	}
 }
 
+func testValidGrokEncryptedContentForSeed(seed byte) string {
+	buf := make([]byte, 0, 256)
+	for i := 0; len(buf) < 256; i++ {
+		sum := sha256.Sum256([]byte{seed, byte(i), byte(i >> 8), byte(i >> 16)})
+		buf = append(buf, sum[:]...)
+	}
+	return base64.RawStdEncoding.EncodeToString(buf[:256])
+}
+
+func testValidGrokEncryptedContent() string {
+	buf := make([]byte, 0, 256)
+	for i := 0; len(buf) < 256; i++ {
+		sum := sha256.Sum256([]byte{byte(i), byte(i >> 8), byte(i >> 16)})
+		buf = append(buf, sum[:]...)
+	}
+	return base64.RawStdEncoding.EncodeToString(buf[:256])
+}

@@ -11,12 +11,15 @@ import (
 
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/cache"
 	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/NGLSL/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 )
+
+func testFakeClaudeSignature() string {
+	return base64.StdEncoding.EncodeToString([]byte{0x12, 0xFF, 0xFE, 0xFD})
+}
 
 func testGeminiSignaturePayload() string {
 	payload := append([]byte{0x0A}, bytes.Repeat([]byte{0x56}, 48)...)
@@ -243,5 +246,3 @@ func TestAntigravityExecutor_CacheModeSkipsPrecheck(t *testing.T) {
 		t.Fatalf("cache mode should skip precheck, got: %v", err)
 	}
 }
-
-

@@ -367,10 +367,10 @@ func codexReasoningReplayTurnAnchorIndex(inputItems []gjson.Result, turn codexRe
 			}
 		}
 	}
-	if len(turn.callIDs) == 0 && turn.assistantFingerprint == "" {
-		return codexReasoningReplayInsertIndex(inputItems, turn.items), true
-	}
-	return 0, false
+	// 找不到 assistant / tool call 精确锚点时，回退到通用插入点。
+	// 否则“缓存里有未匹配 function_call”会把整轮（含 reasoning）一起丢掉，
+	// 而 filter 侧本来就会丢无 matching output 的 call。
+	return codexReasoningReplayInsertIndex(inputItems, turn.items), true
 }
 
 // filterCodexReasoningReplayTurnItems 过滤单轮中已经出现在 input 的 item，

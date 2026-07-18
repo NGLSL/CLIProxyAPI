@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	antigravityauth "github.com/NGLSL/CLIProxyAPI/v7/internal/auth/antigravity"
 	cliproxyauth "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdktranslator "github.com/NGLSL/CLIProxyAPI/v7/sdk/translator"
 )
@@ -201,8 +202,9 @@ func TestAntigravityPrepareRequestAuth_FetchesMissingProjectID(t *testing.T) {
 		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected project discovery request: %s", req.URL.String())
 		}
-		if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
-			t.Fatalf("X-Goog-Api-Client = %q, want empty", got)
+		// fork 路径走 sdkAuth.FetchAntigravityProjectID，会带上官方 IDE 客户端标识。
+		if got := req.Header.Get("X-Goog-Api-Client"); got != antigravityauth.APIClient {
+			t.Fatalf("X-Goog-Api-Client = %q, want %q", got, antigravityauth.APIClient)
 		}
 		raw, errRead := io.ReadAll(req.Body)
 		if errRead != nil {

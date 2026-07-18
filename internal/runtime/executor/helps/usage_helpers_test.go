@@ -148,10 +148,12 @@ func TestParseOpenAIStreamUsageDeepSeekFinalChunk(t *testing.T) {
 }
 
 func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
+	// fork 行为：cache_read/cache_creation 计入 InputTokens，并保留分项字段，方便统计与对账。
 	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_read_input_tokens":7,"cache_creation_input_tokens":19514}}`)
 	detail := ParseClaudeUsage(data)
-	if detail.InputTokens != 3085 {
-		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 3085)
+	wantInput := int64(3085 + 7 + 19514)
+	if detail.InputTokens != wantInput {
+		t.Fatalf("input tokens = %d, want %d (base+cache)", detail.InputTokens, wantInput)
 	}
 	if detail.OutputTokens != 253 {
 		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 253)
@@ -165,8 +167,8 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	if detail.CachedTokens != 7 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
 	}
-	if detail.TotalTokens != 22859 {
-		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22859)
+	if detail.TotalTokens != wantInput+253 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, wantInput+253)
 	}
 }
 

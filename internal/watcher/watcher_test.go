@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/watcher/diff"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	sdkAuth "github.com/NGLSL/CLIProxyAPI/v7/sdk/auth"

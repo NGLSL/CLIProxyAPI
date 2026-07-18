@@ -637,7 +637,8 @@ func TestApplyCodexPromptCacheHeadersClaudeRejectsBareUserID(t *testing.T) {
 
 func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testing.T) {
 	cfg := &config.Config{
-		Routing: config.RoutingConfig{SessionAffinity: true},
+		// IdentityConfuse 仅在 fill-first / sticky-round-robin 策略下启用，避免 round-robin 账号池误混淆。
+		Routing: config.RoutingConfig{Strategy: "fill-first", SessionAffinity: true},
 		Codex:   config.CodexConfig{IdentityConfuse: true},
 	}
 	auth := &cliproxyauth.Auth{ID: "auth-ws-1", Provider: "codex"}

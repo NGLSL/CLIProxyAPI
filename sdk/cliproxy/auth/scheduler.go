@@ -336,7 +336,8 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 	modelKey := canonicalModelKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	stickyRouteKey := stickyRouteKeyFromMetadata(opts.Metadata)
-	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
+	// Codex / xAI 的下游 websocket 请求优先挑 websockets=true 的账号，降低 HTTP 回落抖动。
+	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && (providerKey == "codex" || providerKey == "xai") && pinnedAuthID == ""
 	now := time.Now()
 
 	s.mu.Lock()

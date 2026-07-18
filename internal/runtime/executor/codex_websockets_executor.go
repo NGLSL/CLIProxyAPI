@@ -742,6 +742,25 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
+			// 下游本身是 websocket 时，保持上游事件原样透传，避免再包一层 SSE data: 前缀。
+			// HTTP/SSE 下游仍走 TranslateStream，兼容现有 openai-response 客户端。
+			if cliproxyexecutor.DownstreamWebsocket(ctx) {
+				if len(clientPayload) > 0 {
+					internalusage.ObserveResponseChunkReadyFromContext(ctx)
+				}
+				if !send(cliproxyexecutor.StreamChunk{Payload: clientPayload}) {
+					terminateReason = "context_done"
+					terminateErr = ctx.Err()
+					return
+				}
+				if eventType == "response.completed" || eventType == "response.done" {
+					if completedHasUsage {
+						reporter.Publish(ctx, completedUsage)
+					}
+					return
+				}
+				continue
+			}
 			line := encodeCodexWebsocketAsSSE(clientPayload)
 			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, clientBody, clientBody, line, &param)
 			for i := range chunks {
@@ -1310,8 +1329,12 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 	headers := parseCodexWebsocketErrorHeaders(payload)
 	statusError := statusErr{code: status, msg: string(out)}
 	if isCodexWebsocketConnectionLimitError(payload) {
+		// 连接数打满时由上层立即重试/换号，显式 0 表示“可重试但不要傻等固定秒数”。
 		retryAfter := time.Duration(0)
 		statusError.retryAfter = &retryAfter
+	} else if retryAfter := parseCodexRetryAfter(status, out, time.Now()); retryAfter != nil {
+		// usage_limit_reached 等 429 需要把 resets_in_seconds 透传给 conductor 做冷却。
+		statusError.retryAfter = retryAfter
 	}
 	return statusErrWithHeaders{
 		statusErr: statusError,

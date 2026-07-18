@@ -5,10 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"testing"
-	"time"
 
 	internalconfig "github.com/NGLSL/CLIProxyAPI/v7/internal/config"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/registry"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/NGLSL/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -176,7 +176,7 @@ func TestManager_MarkResult_OpenAICompatServerErrorDoesNotBlockScheduler(t *test
 		t.Fatalf("expected 5xx not to block OpenAI-compatible auth, got unavailable=%v next_retry=%s", state.Unavailable, state.NextRetryAfter)
 	}
 
-	got, errPick := manager.scheduler.pickSingle(ctx, "xiaomi-mimo", model, cliproxyexecutor.Options{}, nil)
+	got, errPick := manager.scheduler.pickSingle(ctx, util.OpenAICompatibleProviderKey("xiaomi-mimo"), model, cliproxyexecutor.Options{}, nil)
 	if errPick != nil {
 		t.Fatalf("pickSingle() after 5xx error = %v", errPick)
 	}

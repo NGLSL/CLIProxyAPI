@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"github.com/NGLSL/CLIProxyAPI/v7/internal/config"
+	"github.com/NGLSL/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -306,4 +307,3 @@ func TestCodexExecutorCacheHelper_ClaudeUsesSessionHeader(t *testing.T) {
 		t.Fatalf("same Claude Code session header produced different prompt_cache_key: first=%q second=%q", firstKey, secondKey)
 	}
 }
-

@@ -43,8 +43,8 @@ func TestFetchProjectIDFallsBackToDailyOnboardUser(t *testing.T) {
 		case "https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser":
 			sawOnboard = true
 			assertOnboardUserHeaders(t, req)
-			assertJSONContains(t, req, `"tier_id":"free-tier"`)
-			assertJSONContains(t, req, `"ide_type":"ANTIGRAVITY"`)
+			assertJSONContains(t, req, `"tierId":"free-tier"`)
+			assertJSONContains(t, req, `"ideType":"ANTIGRAVITY"`)
 			return jsonResponse(`{
 				"done": true,
 				"response": {
@@ -81,15 +81,12 @@ func assertLoadCodeAssistHeaders(t *testing.T, req *http.Request) {
 	if got := req.Header.Get("Accept"); got != "*/*" {
 		t.Fatalf("Accept = %q", got)
 	}
-	if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
-		t.Fatalf("X-Goog-Api-Client = %q, want empty", got)
+	// fork 统一使用官方 IDE 客户端标识，保持与真实 Antigravity 请求一致。
+	if got := req.Header.Get("X-Goog-Api-Client"); got != APIClient {
+		t.Fatalf("X-Goog-Api-Client = %q, want %q", got, APIClient)
 	}
-	userAgent := req.Header.Get("User-Agent")
-	if !strings.HasPrefix(userAgent, "antigravity/hub/") {
-		t.Fatalf("User-Agent = %q", userAgent)
-	}
-	if strings.Contains(userAgent, "google-api-nodejs-client/") {
-		t.Fatalf("User-Agent = %q", userAgent)
+	if got := req.Header.Get("User-Agent"); got != APIUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, APIUserAgent)
 	}
 }
 
@@ -101,15 +98,12 @@ func assertOnboardUserHeaders(t *testing.T, req *http.Request) {
 	if got := req.Header.Get("Accept"); got != "*/*" {
 		t.Fatalf("Accept = %q", got)
 	}
-	if got := req.Header.Get("X-Goog-Api-Client"); got != "gl-node/22.21.1" {
-		t.Fatalf("X-Goog-Api-Client = %q", got)
+	// onboardUser 与 loadCodeAssist 共用同一套 fork 客户端头，避免混用 origin 的 hub UA。
+	if got := req.Header.Get("X-Goog-Api-Client"); got != APIClient {
+		t.Fatalf("X-Goog-Api-Client = %q, want %q", got, APIClient)
 	}
-	userAgent := req.Header.Get("User-Agent")
-	if !strings.HasPrefix(userAgent, "antigravity/hub/") {
-		t.Fatalf("User-Agent = %q", userAgent)
-	}
-	if !strings.Contains(userAgent, "google-api-nodejs-client/10.3.0") {
-		t.Fatalf("User-Agent = %q", userAgent)
+	if got := req.Header.Get("User-Agent"); got != APIUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, APIUserAgent)
 	}
 }
 

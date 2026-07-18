@@ -1140,10 +1140,9 @@ func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityC
 		return
 	}
 
-	setHeaderCasePreserved(headers, "Session-Id", state.promptCacheKey)
-	if headerValueCaseInsensitive(headers, "session_id") != "" {
-		setHeaderCasePreserved(headers, "session_id", state.promptCacheKey)
-	}
+	// Codex 上游历史同时接受 Session_id / Session-Id；混淆时必须保留原有大小写与下划线形态，
+	// 否则 sticky 账号会因 header 形态变化导致缓存键回写失败。优先复用已存在的下划线 key。
+	setCodexSessionHeaderCasePreserved(headers, "Session_id", state.promptCacheKey)
 	if headerValueCaseInsensitive(headers, "Conversation_id") != "" {
 		setHeaderCasePreserved(headers, "Conversation_id", state.promptCacheKey)
 	}

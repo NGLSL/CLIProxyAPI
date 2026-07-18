@@ -2249,13 +2249,17 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, nil
 	}
 	m.mu.Lock()
-	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
-		if !auth.indexAssigned && auth.Index == "" {
-			auth.Index = existing.Index
-			auth.indexAssigned = existing.indexAssigned
-		}
-		preserveRuntimeSnapshotState(auth, existing, time.Now())
+	existing, ok := m.auths[auth.ID]
+	// 已删除的 auth 不允许被 Update “复活”，避免 watcher/异步回调把移除态写回内存。
+	if !ok || existing == nil {
+		m.mu.Unlock()
+		return nil, nil
 	}
+	if !auth.indexAssigned && auth.Index == "" {
+		auth.Index = existing.Index
+		auth.indexAssigned = existing.indexAssigned
+	}
+	preserveRuntimeSnapshotState(auth, existing, time.Now())
 	now := time.Now()
 	clearedCooldown := false
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
@@ -2398,6 +2402,14 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 	}
 	if lastErr != nil {
+		// 普通账号配额打满后，若开启 AntigravityCredits，再尝试 AI Credits 通道。
+		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
+			if resp, ok, errCredits := m.tryAntigravityCreditsExecute(ctx, req, opts); errCredits != nil {
+				return cliproxyexecutor.Response{}, errCredits
+			} else if ok {
+				return resp, nil
+			}
+		}
 		return cliproxyexecutor.Response{}, lastErr
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -2460,6 +2472,14 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	if lastErr != nil {
+		// 流式路径同样在最终失败前尝试 Credits 回退，避免 bootstrap 429 直接透传给客户端。
+		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
+			if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
+				return nil, errCredits
+			} else if ok {
+				return result, nil
+			}
+		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
 			return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
@@ -3863,12 +3883,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
 							}
 						case 500, 502, 503, 504:
+							// OpenAI-compat API Key 上游抖动常见，不因单次 5xx 把账号踢出调度。
+							// 其它渠道走 transientErrorCooldownSeconds（负数关闭、0 用默认、正数自定义秒数）。
 							if disableCooling || isOpenAICompatAPIKeyAuth(auth) {
 								state.Unavailable = false
 								state.NextRetryAfter = time.Time{}
 							} else {
-								next := now.Add(1 * time.Minute)
-								state.NextRetryAfter = next
+								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
 							}
 						default:
 							state.NextRetryAfter = time.Time{}
