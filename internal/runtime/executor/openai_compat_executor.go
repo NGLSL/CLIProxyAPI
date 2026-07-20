@@ -128,6 +128,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
 	}
+	// 所有翻译和配置覆盖完成后再去重，确保重试或规则处理过程中新增的重复
+	// 工具结果也能被清理，避免兼容供应商仅返回泛化的 Invalid request body。
+	translated = normalizeOpenAICompatToolOutputs(translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
@@ -325,6 +328,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	// 流式路径同样必须在最终请求体上处理；这是长会话发生重试后最容易
+	// 累积重复 tool 结果的入口。
+	translated = normalizeOpenAICompatToolOutputs(translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
