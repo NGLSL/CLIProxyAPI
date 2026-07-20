@@ -157,8 +157,11 @@ func ResolveLogDirectory(cfg *config.Config) string {
 }
 
 // ConfigureLogOutput switches the global log destination between rotating files and stdout.
-// When logsMaxTotalSizeMB > 0, a background cleaner removes the oldest log files in the logs directory
-// until the total size is within the limit.
+//
+// The background logs cleaner always runs so orphan request-log temp files/directories
+// (request-body-*.tmp, response-body-*.tmp, request-log-parts-*) are reclaimed.
+// When logsMaxTotalSizeMB > 0 it also deletes the oldest durable log artifacts until the
+// directory is within the configured budget.
 func ConfigureLogOutput(cfg *config.Config) error {
 	SetupBaseLogger()
 
@@ -168,7 +171,7 @@ func ConfigureLogOutput(cfg *config.Config) error {
 	logDir := ResolveLogDirectory(cfg)
 
 	protectedPath := ""
-	if cfg.LoggingToFile {
+	if cfg != nil && cfg.LoggingToFile {
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
 			return fmt.Errorf("logging: failed to create log directory: %w", err)
 		}
@@ -176,11 +179,15 @@ func ConfigureLogOutput(cfg *config.Config) error {
 			_ = logWriter.Close()
 		}
 		protectedPath = filepath.Join(logDir, "main.log")
+		// Cap rotated main.log backups. MaxBackups=0 in lumberjack means "keep all",
+		// which can fill the disk when debug is on under high concurrency. The
+		// logs-max-total-size-mb cleaner is the second line of defence for the whole
+		// logs directory (request logs + app logs + temp artifacts).
 		logWriter = &lumberjack.Logger{
 			Filename:   protectedPath,
-			MaxSize:    10,
-			MaxBackups: 0,
-			MaxAge:     0,
+			MaxSize:    10, // MB per file
+			MaxBackups: 50, // hard cap on rotated main.log copies
+			MaxAge:     7,  // days
 			Compress:   false,
 		}
 		log.SetOutput(logWriter)
@@ -192,7 +199,20 @@ func ConfigureLogOutput(cfg *config.Config) error {
 		log.SetOutput(os.Stdout)
 	}
 
-	configureLogDirCleanerLocked(logDir, cfg.LogsMaxTotalSizeMB, protectedPath)
+	maxTotalMB := 0
+	if cfg != nil {
+		maxTotalMB = cfg.LogsMaxTotalSizeMB
+	}
+	// request-log writes one full body dump per request. Unlimited retention (0) under
+	// high concurrency is a known disk-fill path that can make the host unreachable.
+	// When request-log is on and the admin has not set a budget, apply a safety default
+	// instead of silently growing forever. Explicit positive values are always honored.
+	const defaultRequestLogBudgetMB = 1024
+	if cfg != nil && cfg.RequestLog && maxTotalMB <= 0 {
+		maxTotalMB = defaultRequestLogBudgetMB
+		log.Warnf("logging: request-log is enabled while logs-max-total-size-mb is 0; applying safety budget of %d MB. Set logs-max-total-size-mb explicitly (or disable request-log) for production", defaultRequestLogBudgetMB)
+	}
+	configureLogDirCleanerLocked(logDir, maxTotalMB, protectedPath)
 	return nil
 }
 

@@ -65,8 +65,12 @@ type Config struct {
 	// LoggingToFile controls whether application logs are written to rotating files or stdout.
 	LoggingToFile bool `yaml:"logging-to-file" json:"logging-to-file"`
 
-	// LogsMaxTotalSizeMB limits the total size (in MB) of log files under the logs directory.
-	// When exceeded, the oldest log files are deleted until within the limit. Set to 0 to disable.
+	// LogsMaxTotalSizeMB limits the total size (in MB) of artifacts under the logs directory
+	// (app logs, request logs, *.tmp body spools, and request-log-parts-* temp dirs).
+	// When exceeded, the oldest artifacts are deleted until within the limit.
+	// Set to 0 to disable the size budget when request-log is off.
+	// When request-log is enabled and this is 0, ConfigureLogOutput applies a safety budget
+	// of 1024 MB so high-concurrency request dumps cannot silently fill the disk.
 	LogsMaxTotalSizeMB int `yaml:"logs-max-total-size-mb" json:"logs-max-total-size-mb"`
 
 	// ErrorLogsMaxFiles limits the number of error log files retained when request logging is disabled.

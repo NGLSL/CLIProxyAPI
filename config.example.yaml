@@ -81,13 +81,25 @@ plugins:
       mode: "safe" # enum example: safe, fast
 
 # When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
+# Production / high-concurrency recommendation: true
 commercial-mode: false
+
+# When true, write one full request/response dump per API call under the logs directory.
+# This is the main disk-fill risk under high concurrency. Prefer false in production;
+# use only while actively debugging, and always pair with logs-max-total-size-mb.
+request-log: false
 
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 
-# Maximum total size (MB) of log files under the logs directory. When exceeded, the oldest log
-# files are deleted until within the limit. Set to 0 to disable.
+# Maximum total size (MB) of artifacts under the logs directory (app logs, request logs,
+# *.tmp body spools, and request-log-parts-* temp dirs). When exceeded, the oldest artifacts
+# are deleted until within the limit.
+# Set to 0 to disable the size budget when request-log is off.
+# When request-log is enabled and this is 0, a safety budget of 1024 MB is applied automatically
+# (high concurrency request-log dumps can otherwise fill the disk and make the host unreachable).
+# Production recommendation: set an explicit budget (e.g. 512 or 1024) and keep request-log false
+# unless you are actively debugging.
 logs-max-total-size-mb: 0
 
 # Maximum number of error log files retained when request logging is disabled.

@@ -419,6 +419,11 @@ type StreamingLogWriter interface {
 	Close() error
 }
 
+// defaultRequestLogDiskConcurrency caps how many request-log disk writes may run at once.
+// Without this limit, a concurrency spike creates thousands of .log / .tmp / request-log-parts
+// files in parallel and can exhaust the system disk before the background size cleaner runs.
+const defaultRequestLogDiskConcurrency = 32
+
 // FileRequestLogger implements RequestLogger using file-based storage.
 // It provides file-based logging functionality for HTTP requests and responses.
 type FileRequestLogger struct {
@@ -432,6 +437,10 @@ type FileRequestLogger struct {
 	errorLogsMaxFiles int
 
 	homeEnabled bool
+
+	// diskSem limits concurrent on-disk request-log operations (temp files + final .log).
+	// A full semaphore causes that request's log to be dropped instead of blocking the API path.
+	diskSem chan struct{}
 }
 
 // NewFileRequestLogger creates a new file-based request logger.
@@ -491,6 +500,34 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 		enabled:           enabled,
 		logsDir:           logsDir,
 		errorLogsMaxFiles: errorLogsMaxFiles,
+		// Buffered semaphore: capacity = max concurrent disk log jobs.
+		diskSem: make(chan struct{}, defaultRequestLogDiskConcurrency),
+	}
+}
+
+// tryAcquireDiskSlot reserves one concurrent disk-log slot without blocking the request path.
+// Returns false when the concurrency budget is already exhausted (caller should skip logging).
+func (l *FileRequestLogger) tryAcquireDiskSlot() bool {
+	if l == nil || l.diskSem == nil {
+		return true
+	}
+	select {
+	case l.diskSem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseDiskSlot frees a previously acquired concurrent disk-log slot.
+func (l *FileRequestLogger) releaseDiskSlot() {
+	if l == nil || l.diskSem == nil {
+		return
+	}
+	select {
+	case <-l.diskSem:
+	default:
+		// Defensive: never block if release is called without a matching acquire.
 	}
 }
 
@@ -591,6 +628,15 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 		}
 		return l.forwardRequestLogToHome(context.Background(), requestHeaders, requestID, buf.String())
 	}
+
+	// Bound concurrent on-disk logging so a concurrency spike cannot open thousands of
+	// temp/final log files at once. Prefer dropping this request's log over blocking the
+	// API handler or filling the disk before the background cleaner can catch up.
+	if !l.tryAcquireDiskSlot() {
+		log.Warn("request logging skipped: concurrent disk-log budget exhausted")
+		return nil
+	}
+	defer l.releaseDiskSlot()
 
 	// Ensure logs directory exists
 	if errEnsure := l.ensureLogsDir(); errEnsure != nil {
@@ -696,8 +742,16 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		return newHomeStreamingLogWriter(url, method, headers, body), nil
 	}
 
+	// Same concurrency budget as non-streaming path. Slot is held for the whole stream
+	// lifetime and released in FileStreamingLogWriter.Close (including error paths).
+	if !l.tryAcquireDiskSlot() {
+		log.Warn("streaming request logging skipped: concurrent disk-log budget exhausted")
+		return &NoOpStreamingLogWriter{}, nil
+	}
+
 	// Ensure logs directory exists
 	if err := l.ensureLogsDir(); err != nil {
+		l.releaseDiskSlot()
 		return nil, fmt.Errorf("failed to create logs directory: %w", err)
 	}
 
@@ -714,18 +768,21 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 
 	requestBodyPath, errTemp := l.writeRequestBodyTempFile(body)
 	if errTemp != nil {
+		l.releaseDiskSlot()
 		return nil, fmt.Errorf("failed to create request body temp file: %w", errTemp)
 	}
 
 	responseBodyFile, errCreate := os.CreateTemp(l.logsDir, "response-body-*.tmp")
 	if errCreate != nil {
 		_ = os.Remove(requestBodyPath)
+		l.releaseDiskSlot()
 		return nil, fmt.Errorf("failed to create response body temp file: %w", errCreate)
 	}
 	responseBodyPath := responseBodyFile.Name()
 
 	// Create streaming writer
 	writer := &FileStreamingLogWriter{
+		logger:           l,
 		logFilePath:      filePath,
 		url:              url,
 		method:           method,
@@ -1681,6 +1738,10 @@ func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[st
 // It spools streaming response chunks to a temporary file to avoid retaining large responses in memory.
 // The final log file is assembled when Close is called.
 type FileStreamingLogWriter struct {
+	// logger is the parent FileRequestLogger that owns the disk concurrency budget.
+	// Close releases one slot acquired by LogStreamingRequest.
+	logger *FileRequestLogger
+
 	// logFilePath is the final log file path.
 	logFilePath string
 
@@ -1865,6 +1926,12 @@ func (w *FileStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 // Returns:
 //   - error: An error if closing fails, nil otherwise
 func (w *FileStreamingLogWriter) Close() error {
+	// Always release the concurrent disk-log slot acquired in LogStreamingRequest,
+	// including early-return / error paths, so the budget cannot leak under failures.
+	if w != nil && w.logger != nil {
+		defer w.logger.releaseDiskSlot()
+	}
+
 	if w.chunkChan != nil {
 		close(w.chunkChan)
 	}
